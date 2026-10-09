@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Antenna Aligner</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- Status bar -->
+    <header id="status-bar">
+        <span class="status-dot disconnected" id="status-dot"></span>
+        <span id="status-text">Connecting…</span>
+        <span id="router-info"></span>
+        <button id="sound-toggle" class="icon-btn" title="Toggle sound">🔇</button>
+    </header>
+
+    <!-- Mode tabs -->
+    <nav id="mode-tabs">
+        <button class="tab active" data-mode="guided">Guided</button>
+        <button class="tab" data-mode="live">Live</button>
+        <button class="tab" data-mode="speed">Speed Test</button>
+    </nav>
+
+    <!-- Main content -->
+    <main id="app">
+        <!-- Router offline banner -->
+        <div id="offline-banner" class="banner error hidden">
+            <span id="offline-text">Router offline</span>
+        </div>
+
+        <!-- Score display -->
+        <section id="score-section" class="card">
+            <div id="big-score" class="score-unknown">--</div>
+            <div id="quality-label">--</div>
+            <div id="metrics">
+                <div class="metric">
+                    <span class="metric-label">RSRP</span>
+                    <span class="metric-value" id="rsrp-value">--</span>
+                    <span class="metric-unit">dBm</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">SINR</span>
+                    <span class="metric-value" id="sinr-value">--</span>
+                    <span class="metric-unit">dB</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">RSRQ</span>
+                    <span class="metric-value" id="rsrq-value">--</span>
+                    <span class="metric-unit">dB</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Direction panel (guided mode) -->
+        <section id="direction-panel" class="card">
+            <div id="direction-arrow">🔧</div>
+            <div id="direction-text">Select a mode to begin</div>
+            <div id="direction-amount"></div>
+            <button id="measure-btn" class="primary-btn" disabled>Measure now</button>
+            <div id="measure-progress" class="hidden">
+                <svg id="progress-ring" viewBox="0 0 120 120">
+                    <circle class="progress-bg" cx="60" cy="60" r="54"/>
+                    <circle class="progress-fg" cx="60" cy="60" r="54" id="progress-circle"/>
+                </svg>
+                <span id="progress-text"></span>
+            </div>
+        </section>
+
+        <!-- Live mode panel (hidden by default) -->
+        <section id="live-panel" class="card hidden">
+            <div id="live-trend-arrow">→</div>
+            <div id="live-trend-text">Steady</div>
+            <div id="live-best">Best: --</div>
+            <button id="mark-btn" class="primary-btn">Mark this position</button>
+        </section>
+
+        <!-- Speed test panel (hidden by default) -->
+        <section id="speed-panel" class="card hidden">
+            <h3>Internet Speed Test</h3>
+            <div class="speed-grid">
+                <div class="speed-box">
+                    <span class="speed-label">Ping</span>
+                    <span class="speed-value" id="speed-ping">--</span>
+                    <span class="speed-unit">ms</span>
+                </div>
+                <div class="speed-box">
+                    <span class="speed-label">Download</span>
+                    <span class="speed-value" id="speed-download">--</span>
+                    <span class="speed-unit">Mbps</span>
+                </div>
+                <div class="speed-box">
+                    <span class="speed-label">Upload</span>
+                    <span class="speed-value" id="speed-upload">--</span>
+                    <span class="speed-unit">Mbps</span>
+                </div>
+            </div>
+            <div id="speed-status-text" class="speed-status">Ready</div>
+            <div class="button-row">
+                <button id="speedtest-btn" class="primary-btn">Start Speed Test</button>
+            </div>
+        </section>
+
+        <!-- Tower switch warning -->
+        <div id="tower-warning" class="banner warn hidden">
+            ⚠ Router changed tower during this measurement. Consider re-measuring.
+            <button id="remeasure-btn" class="secondary-btn">Re-measure</button>
+        </div>
+
+        <!-- Phase progress -->
+        <section id="phase-section" class="card">
+            <div id="phase-text">Phase: --</div>
+            <div class="progress-bar">
+                <div class="progress-fill" id="phase-progress"></div>
+            </div>
+        </section>
+
+        <!-- Polar chart -->
+        <section id="polar-section" class="card">
+            <h3>Azimuth Scan</h3>
+            <svg id="polar-chart" viewBox="0 0 300 300"></svg>
+        </section>
+
+        <!-- History graph -->
+        <section id="history-section" class="card">
+            <h3>Signal History (5 min)</h3>
+            <svg id="history-chart" viewBox="0 0 500 150"></svg>
+        </section>
+
+        <!-- Positions table -->
+        <section id="positions-section" class="card">
+            <h3>Measured Positions</h3>
+            <div class="table-scroll">
+                <table id="positions-table">
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>Az°</th>
+                            <th>Tilt°</th>
+                            <th>Score</th>
+                            <th>RSRP</th>
+                            <th>SINR</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody id="positions-body"></tbody>
+                </table>
+            </div>
+            <div class="button-row">
+                <a href="/api/export.csv" class="secondary-btn" id="export-btn">Export CSV</a>
+                <button id="skip-btn" class="secondary-btn">Skip Phase</button>
+                <button id="reset-btn" class="secondary-btn danger">Reset</button>
+            </div>
+        </section>
+
+        <!-- Mock controls -->
+        <section id="mock-controls" class="card hidden">
+            <h3>🧪 Mock Controls</h3>
+            <div class="mock-buttons">
+                <button data-move="left">← Left 10°</button>
+                <button data-move="right">Right 10° →</button>
+                <button data-move="up">↑ Up 5°</button>
+                <button data-move="down">↓ Down 5°</button>
+            </div>
+        </section>
+    </main>
+
+    <script src="app.js"></script>
+</body>
+</html>

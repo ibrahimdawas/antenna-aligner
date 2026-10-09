@@ -1,0 +1,9 @@
+{
+  "router_url": "http://192.168.1.1",
+  "username": "admin",
+  "password": "admin",
+  "listen": ":8080",
+  "poll_interval_ms": 1000,
+  "settle_seconds": 5,
+  "measure_seconds": 12
+}
