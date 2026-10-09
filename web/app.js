@@ -6,12 +6,21 @@
 
     // --- State ---
     let state = null;
-    let soundEnabled = false;
+    let soundEnabled = localStorage.getItem('antenna_sound') === 'true';
+    let vibeEnabled = localStorage.getItem('antenna_vibrate') !== null
+        ? localStorage.getItem('antenna_vibrate') === 'true'
+        : true;
     let wakeLock = null;
     let audioCtx = null;
     let eventSource = null;
     let historyScores = [];
     let lastInstruction = null;
+    let lastInstructionKey = null;
+    let lastMeasureState = 'IDLE';
+    let lastWarnedTowerPosId = null;
+    let lastLiveTrend = 'STEADY';
+    let lastLiveBestScore = 0;
+    let instructionFiredThisTick = false;
     let measureAnimFrame = null;
     let mockMode = false;
 
@@ -23,6 +32,8 @@
     document.addEventListener('DOMContentLoaded', init);
 
     function init() {
+        updateSoundUI();
+        updateVibeUI();
         fetchState();
         connectSSE();
         bindEvents();
@@ -155,6 +166,7 @@
     // --- Session update ---
     function updateSession(s) {
         state = s;
+        instructionFiredThisTick = false;
 
         // Mode tabs
         $$('.tab').forEach(function (tab) {
@@ -186,6 +198,11 @@
         // Tower warning
         if (s.positions && s.positions.length > 0) {
             const lastPos = s.positions[s.positions.length - 1];
+            if (lastPos.tower_switch && lastPos.id !== lastWarnedTowerPosId) {
+                lastWarnedTowerPosId = lastPos.id;
+                playWarningSound();
+                vibrateWarning();
+            }
             $('#tower-warning').classList.toggle('hidden', !lastPos.tower_switch);
         } else {
             $('#tower-warning').classList.add('hidden');
@@ -206,6 +223,12 @@
         } else {
             btn.disabled = true;
         }
+    }
+
+    function getInstructionKey(inst) {
+        if (!inst) return '';
+        const cur = (inst.progress && inst.progress.current != null) ? inst.progress.current : 0;
+        return `${inst.phase || ''}:${inst.action || ''}:${inst.amount_deg || 0}:${cur}:${inst.text || ''}`;
     }
 
     // --- Direction panel ---
@@ -241,19 +264,26 @@
         text.textContent = inst.text || '';
         amount.textContent = inst.amount_deg ? 'about ' + inst.amount_deg + '°' : '';
 
-        // Pulse animation on new instruction
-        if (lastInstruction && lastInstruction.action !== inst.action) {
+        const instKey = getInstructionKey(inst);
+        const isNew = lastInstructionKey !== null && instKey !== lastInstructionKey;
+
+        // Pulse animation, audio, and vibration on step update
+        if (isNew) {
             arrow.classList.remove('pulse');
             void arrow.offsetWidth; // trigger reflow
             arrow.classList.add('pulse');
 
-            if (soundEnabled) {
-                playBeep();
-                if (navigator.vibrate) {
-                    navigator.vibrate(100);
-                }
+            instructionFiredThisTick = true;
+
+            if (inst.action === 'DONE') {
+                playSuccessSound();
+                vibrateSuccess();
+            } else {
+                playInstructionSound();
+                vibrateInstruction();
             }
         }
+        lastInstructionKey = instKey;
         lastInstruction = inst;
     }
 
@@ -270,6 +300,23 @@
         $('#live-trend-arrow').style.color = trend.color;
         $('#live-trend-text').textContent = trend.text;
         $('#live-best').textContent = 'Best: ' + (s.live_best_score > 0 ? s.live_best_score.toFixed(1) : '--');
+
+        // Audio & vibration cues in Live mode
+        if (s.live_best_score > 0 && s.live_best_score > lastLiveBestScore) {
+            if (lastLiveBestScore > 0) {
+                playLiveNewBestSound();
+                vibrateLiveNewBest();
+            }
+            lastLiveBestScore = s.live_best_score;
+        }
+
+        if (s.live_trend && s.live_trend !== lastLiveTrend) {
+            if (s.live_trend === 'WARMER') {
+                playLiveWarmerSound();
+                vibrateLiveWarmer();
+            }
+            lastLiveTrend = s.live_trend;
+        }
     }
 
     // --- Phase progress ---
@@ -301,12 +348,23 @@
         const prog = $('#measure-progress');
         const btn = $('#measure-btn');
 
+        const prevMeasureState = lastMeasureState;
+        lastMeasureState = s.measure_state;
+
         if (s.measure_state === 'IDLE') {
             prog.classList.add('hidden');
             btn.textContent = 'Measure now';
             if (measureAnimFrame) {
                 cancelAnimationFrame(measureAnimFrame);
                 measureAnimFrame = null;
+            }
+
+            // If measurement just completed
+            if (prevMeasureState === 'COLLECTING' || prevMeasureState === 'SETTLING') {
+                if (!instructionFiredThisTick) {
+                    playMeasureCompleteSound();
+                    vibrateMeasureComplete();
+                }
             }
             return;
         }
@@ -509,37 +567,55 @@
 
     // --- Event binding ---
     function bindEvents() {
+        // Global unlock on first user interaction for Web Audio autoplay policy
+        document.addEventListener('click', unlockAudio, { passive: true });
+        document.addEventListener('touchstart', unlockAudio, { passive: true });
+
         // Mode tabs
         $$('.tab').forEach(function (tab) {
             tab.addEventListener('click', function () {
+                unlockAudio();
                 const mode = this.dataset.mode;
+                lastInstructionKey = null;
+                lastInstruction = null;
+                lastLiveBestScore = 0;
+                lastLiveTrend = 'STEADY';
                 postJSON('/api/session/start', { mode: mode });
             });
         });
 
         // Measure
         $('#measure-btn').addEventListener('click', function () {
+            unlockAudio();
             postJSON('/api/session/measure', {});
         });
 
         // Re-measure
         $('#remeasure-btn').addEventListener('click', function () {
+            unlockAudio();
             postJSON('/api/session/remeasure', {});
         });
 
         // Skip
         $('#skip-btn').addEventListener('click', function () {
+            unlockAudio();
             postJSON('/api/session/skip', {});
         });
 
         // Mark (live mode)
         $('#mark-btn').addEventListener('click', function () {
+            unlockAudio();
             postJSON('/api/session/mark', {});
         });
 
         // Reset
         $('#reset-btn').addEventListener('click', function () {
             if (confirm('Reset all measurements?')) {
+                lastInstructionKey = null;
+                lastInstruction = null;
+                lastWarnedTowerPosId = null;
+                lastLiveBestScore = 0;
+                lastLiveTrend = 'STEADY';
                 postJSON('/api/session/reset', {});
                 historyScores = [];
                 drawHistoryChart();
@@ -613,8 +689,24 @@
 
         // Sound toggle
         $('#sound-toggle').addEventListener('click', function () {
+            unlockAudio();
             soundEnabled = !soundEnabled;
-            this.textContent = soundEnabled ? '🔊' : '🔇';
+            localStorage.setItem('antenna_sound', soundEnabled ? 'true' : 'false');
+            updateSoundUI();
+            if (soundEnabled) {
+                playInstructionSound();
+            }
+        });
+
+        // Vibration toggle
+        $('#vibe-toggle').addEventListener('click', function () {
+            if (!isVibeSupported()) return;
+            vibeEnabled = !vibeEnabled;
+            localStorage.setItem('antenna_vibrate', vibeEnabled ? 'true' : 'false');
+            updateVibeUI();
+            if (vibeEnabled) {
+                vibrate(100);
+            }
         });
 
         // Mock controls
@@ -642,23 +734,197 @@
         }
     }
 
-    // --- Sound ---
-    function playBeep() {
-        try {
-            if (!audioCtx) {
-                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    // --- Audio & Vibration Engine ---
+    function isVibeSupported() {
+        return ('vibrate' in navigator) && typeof navigator.vibrate === 'function';
+    }
+
+    function getAudioContext() {
+        if (!audioCtx) {
+            const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+            if (AudioContextClass) {
+                audioCtx = new AudioContextClass();
             }
-            const osc = audioCtx.createOscillator();
-            const gain = audioCtx.createGain();
+        }
+        if (audioCtx && audioCtx.state === 'suspended') {
+            audioCtx.resume().catch(() => {});
+        }
+        return audioCtx;
+    }
+
+    function unlockAudio() {
+        getAudioContext();
+    }
+
+    function playTone(freq, duration = 0.12, type = 'sine', gainLevel = 0.25) {
+        if (!soundEnabled) return;
+        try {
+            const ctx = getAudioContext();
+            if (!ctx) return;
+            const now = ctx.currentTime;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+
+            osc.type = type;
+            osc.frequency.setValueAtTime(freq, now);
+
+            gain.gain.setValueAtTime(0.0001, now);
+            gain.gain.exponentialRampToValueAtTime(gainLevel, now + 0.015);
+            gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+
             osc.connect(gain);
-            gain.connect(audioCtx.destination);
-            osc.frequency.value = 880;
-            gain.gain.value = 0.3;
-            osc.start();
-            osc.stop(audioCtx.currentTime + 0.15);
+            gain.connect(ctx.destination);
+
+            osc.start(now);
+            osc.stop(now + duration + 0.02);
         } catch (e) {
             // Audio not available
         }
+    }
+
+    function playSequence(notes) {
+        if (!soundEnabled) return;
+        try {
+            const ctx = getAudioContext();
+            if (!ctx) return;
+            const baseTime = ctx.currentTime;
+            let offset = 0;
+
+            for (const item of notes) {
+                const freq = typeof item === 'number' ? item : item.freq;
+                const duration = item.duration || 0.09;
+                const delay = item.delay != null ? item.delay : offset;
+                const gainLevel = item.gain != null ? item.gain : 0.22;
+                const type = item.type || 'sine';
+
+                const startTime = baseTime + delay;
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+
+                osc.type = type;
+                osc.frequency.setValueAtTime(freq, startTime);
+
+                gain.gain.setValueAtTime(0.0001, startTime);
+                gain.gain.exponentialRampToValueAtTime(gainLevel, startTime + 0.015);
+                gain.gain.exponentialRampToValueAtTime(0.0001, startTime + duration);
+
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+
+                osc.start(startTime);
+                osc.stop(startTime + duration + 0.02);
+
+                offset = delay + duration + 0.02;
+            }
+        } catch (e) {
+            // Audio not available
+        }
+    }
+
+    function vibrate(pattern) {
+        if (!vibeEnabled || !isVibeSupported()) return;
+        try {
+            navigator.vibrate(pattern);
+        } catch (e) {
+            // Safe ignore
+        }
+    }
+
+    function playInstructionSound() {
+        // Two-tone rising prompt: 659Hz -> 880Hz
+        playSequence([
+            { freq: 659, duration: 0.08, gain: 0.22 },
+            { freq: 880, duration: 0.12, gain: 0.25 }
+        ]);
+    }
+
+    function vibrateInstruction() {
+        vibrate(120);
+    }
+
+    function playMeasureCompleteSound() {
+        // Quick double chirp: 740Hz -> 988Hz
+        playSequence([
+            { freq: 740, duration: 0.06, gain: 0.2 },
+            { freq: 988, duration: 0.09, gain: 0.22 }
+        ]);
+    }
+
+    function vibrateMeasureComplete() {
+        vibrate([80, 50, 80]);
+    }
+
+    function playSuccessSound() {
+        // Triumphant fanfare: C5 (523Hz), E5 (659Hz), G5 (784Hz), C6 (1046Hz)
+        playSequence([
+            { freq: 523.25, duration: 0.09, gain: 0.22 },
+            { freq: 659.25, duration: 0.09, gain: 0.22 },
+            { freq: 783.99, duration: 0.10, gain: 0.25 },
+            { freq: 1046.50, duration: 0.24, gain: 0.28 }
+        ]);
+    }
+
+    function vibrateSuccess() {
+        vibrate([100, 60, 100, 60, 250]);
+    }
+
+    function playWarningSound() {
+        // Low caution alert: 330Hz -> 260Hz
+        playSequence([
+            { freq: 330, duration: 0.12, type: 'triangle', gain: 0.25 },
+            { freq: 260, duration: 0.18, type: 'triangle', gain: 0.25 }
+        ]);
+    }
+
+    function vibrateWarning() {
+        vibrate([180, 80, 180]);
+    }
+
+    function playLiveWarmerSound() {
+        playTone(920, 0.07, 'sine', 0.18);
+    }
+
+    function vibrateLiveWarmer() {
+        vibrate(40);
+    }
+
+    function playLiveNewBestSound() {
+        playSequence([
+            { freq: 880, duration: 0.07, gain: 0.22 },
+            { freq: 1174.66, duration: 0.12, gain: 0.25 }
+        ]);
+    }
+
+    function vibrateLiveNewBest() {
+        vibrate([60, 40, 80]);
+    }
+
+    function playBeep() {
+        playInstructionSound();
+    }
+
+    function updateSoundUI() {
+        const btn = $('#sound-toggle');
+        if (!btn) return;
+        btn.textContent = soundEnabled ? '🔊' : '🔇';
+        btn.title = soundEnabled ? 'Sound: On (Click to mute)' : 'Sound: Muted (Click to enable)';
+        btn.setAttribute('aria-label', btn.title);
+    }
+
+    function updateVibeUI() {
+        const btn = $('#vibe-toggle');
+        if (!btn) return;
+        if (!isVibeSupported()) {
+            btn.textContent = '📴';
+            btn.classList.add('unsupported');
+            btn.title = 'Vibration not supported on this device/browser';
+            btn.setAttribute('aria-label', btn.title);
+            return;
+        }
+        btn.textContent = vibeEnabled ? '📳' : '📴';
+        btn.classList.remove('unsupported');
+        btn.title = vibeEnabled ? 'Vibration: On (Click to turn off)' : 'Vibration: Off (Click to enable)';
+        btn.setAttribute('aria-label', btn.title);
     }
 
     // --- Wake Lock ---

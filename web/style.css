@@ -87,17 +87,40 @@ h3 {
     color: var(--muted);
 }
 
+.status-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
 .icon-btn {
     background: transparent;
     border: none;
     font-size: 20px;
     cursor: pointer;
     padding: 4px;
-    min-width: 48px;
-    min-height: 48px;
+    min-width: 44px;
+    min-height: 44px;
     display: flex;
     align-items: center;
     justify-content: center;
+    border-radius: 8px;
+    transition: background 0.15s ease, transform 0.1s ease;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+.icon-btn:hover {
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.icon-btn:active {
+    transform: scale(0.92);
+}
+
+.icon-btn.unsupported {
+    opacity: 0.35;
+    cursor: not-allowed;
 }
 
 /* ===== Mode Tabs ===== */

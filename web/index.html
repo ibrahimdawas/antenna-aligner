@@ -11,8 +11,10 @@
     <header id="status-bar">
         <span class="status-dot disconnected" id="status-dot"></span>
         <span id="status-text">Connecting…</span>
-        <span id="router-info"></span>
-        <button id="sound-toggle" class="icon-btn" title="Toggle sound">🔇</button>
+        <div class="status-actions">
+            <button id="sound-toggle" class="icon-btn" title="Toggle sound" aria-label="Toggle sound">🔇</button>
+            <button id="vibe-toggle" class="icon-btn" title="Toggle vibration" aria-label="Toggle vibration">📳</button>
+        </div>
     </header>
 
     <!-- Mode tabs -->
