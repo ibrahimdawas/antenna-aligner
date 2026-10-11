@@ -5,5 +5,10 @@
   "listen": ":8080",
   "poll_interval_ms": 1000,
   "settle_seconds": 5,
-  "measure_seconds": 12
+  "measure_seconds": 12,
+  "location": { "lat": 0, "lon": 0 },
+  "tower_source": "opencellid",
+  "opencellid_token": "",
+  "towers_csv_path": "",
+  "tower_radius_m": 10000
 }

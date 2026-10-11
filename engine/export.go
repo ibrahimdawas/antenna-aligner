@@ -63,7 +63,7 @@ func ptrFmt(v *float64) string {
 
 func stepDegForPhase(phase Phase) int {
 	switch phase {
-	case PhaseCoarse:
+	case PhaseHint, PhaseCoarse:
 		return 30
 	case PhaseFineAz10:
 		return 10

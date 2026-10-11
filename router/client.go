@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -16,14 +17,18 @@ import (
 
 // HuaweiClient implements SignalSource for the B310s-22 HiLink API.
 type HuaweiClient struct {
-	mu        sync.Mutex
-	routerURL string
-	username  string
-	password  string
-	client    *http.Client
-	sesInfo   string // session cookie value
-	token     string // CSRF token
-	loggedIn  bool
+	mu           sync.Mutex
+	routerURL    string
+	username     string
+	password     string
+	client       *http.Client
+	sesInfo      string // session cookie value
+	token        string // CSRF token
+	loggedIn     bool
+	cachedPLMN   string
+	cachedMCC    *int
+	cachedMNC    *int
+	lastPLMNTime time.Time
 }
 
 // NewHuaweiClient creates a client for the given router.
@@ -53,6 +58,8 @@ type signalResponse struct {
 	CellID  string   `xml:"cell_id"`
 	PCI     string   `xml:"pci"`
 	Band    string   `xml:"band"`
+	Tac     string   `xml:"tac"`
+	Lac     string   `xml:"lac"`
 	// Some firmware uses different element names
 	RSRP2   string `xml:"Rsrp"`
 	RSRQ2   string `xml:"Rsrq"`
@@ -61,6 +68,16 @@ type signalResponse struct {
 	CellID2 string `xml:"Cell_id"`
 	PCI2    string `xml:"Pci"`
 	Band2   string `xml:"Band"`
+	Tac2    string `xml:"Tac"`
+	Lac2    string `xml:"Lac"`
+}
+
+type plmnResponse struct {
+	XMLName   xml.Name `xml:"response"`
+	State     string   `xml:"State"`
+	Numeric   string   `xml:"Numeric"`
+	ShortName string   `xml:"ShortName"`
+	FullName  string   `xml:"FullName"`
 }
 
 type errorResponse struct {
@@ -89,6 +106,7 @@ func (c *HuaweiClient) FetchSample() (*Sample, error) {
 	if !c.loggedIn {
 		sample, err := c.fetchSignal()
 		if err == nil {
+			c.enrichSample(sample)
 			return sample, nil
 		}
 		// Check if it's an auth error
@@ -105,6 +123,7 @@ func (c *HuaweiClient) FetchSample() (*Sample, error) {
 	// Try with session
 	sample, err := c.fetchSignal()
 	if err == nil {
+		c.enrichSample(sample)
 		return sample, nil
 	}
 	if !isAuthError(err) {
@@ -117,10 +136,62 @@ func (c *HuaweiClient) FetchSample() (*Sample, error) {
 	if loginErr := c.login(); loginErr != nil {
 		return nil, fmt.Errorf("re-login failed: %w", loginErr)
 	}
-	return c.fetchSignal()
+	sample, err = c.fetchSignal()
+	if err == nil {
+		c.enrichSample(sample)
+	}
+	return sample, err
 }
 
 func (c *HuaweiClient) Close() {}
+
+func (c *HuaweiClient) fetchPLMN() {
+	req, err := http.NewRequest("GET", c.routerURL+"/api/net/current-plmn", nil)
+	if err != nil {
+		return
+	}
+	c.addHeaders(req)
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	c.updateTokenFromResponse(resp)
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return
+	}
+
+	var plmn plmnResponse
+	if err := xml.Unmarshal(body, &plmn); err != nil {
+		return
+	}
+
+	num := strings.TrimSpace(plmn.Numeric)
+	if len(num) >= 5 {
+		c.cachedPLMN = num
+		c.lastPLMNTime = time.Now()
+		if mcc, err := strconv.Atoi(num[:3]); err == nil {
+			c.cachedMCC = &mcc
+		}
+		if mnc, err := strconv.Atoi(num[3:]); err == nil {
+			c.cachedMNC = &mnc
+		}
+	}
+}
+
+func (c *HuaweiClient) enrichSample(s *Sample) {
+	if s == nil {
+		return
+	}
+	if c.cachedMCC == nil || time.Since(c.lastPLMNTime) > 60*time.Second {
+		c.fetchPLMN()
+	}
+	s.MCC = c.cachedMCC
+	s.MNC = c.cachedMNC
+	s.PLMN = c.cachedPLMN
+}
 
 func (c *HuaweiClient) fetchSignal() (*Sample, error) {
 	req, err := http.NewRequest("GET", c.routerURL+"/api/device/signal", nil)
@@ -171,8 +242,43 @@ func parseSignalXML(body []byte) (*Sample, error) {
 	s.PCI = firstNonEmpty(sig.PCI, sig.PCI2)
 	s.Band = firstNonEmpty(sig.Band, sig.Band2)
 
-	log.Printf("[router] Signal: RSRP=%v RSRQ=%v SINR=%v RSSI=%v CellID=%s Band=%s",
-		ptrStr(s.RSRP), ptrStr(s.RSRQ), ptrStr(s.SINR), ptrStr(s.RSSI), s.CellID, s.Band)
+	// TAC / LAC
+	tacStr := firstNonEmpty(sig.Tac, sig.Tac2, sig.Lac, sig.Lac2)
+	if tacStr != "" {
+		tacClean := strings.TrimSpace(tacStr)
+		if strings.HasPrefix(strings.ToLower(tacClean), "0x") {
+			if val, err := strconv.ParseInt(tacClean[2:], 16, 64); err == nil {
+				t := int(val)
+				s.TAC = &t
+			}
+		} else {
+			if val, err := strconv.ParseInt(tacClean, 10, 64); err == nil {
+				t := int(val)
+				s.TAC = &t
+			}
+		}
+	}
+
+	// Parse ECI (28-bit: eNB = eci >> 8, sector = eci & 0xFF)
+	if s.CellID != "" {
+		cidClean := strings.TrimSpace(s.CellID)
+		var eci int64
+		var err error
+		if strings.HasPrefix(strings.ToLower(cidClean), "0x") {
+			eci, err = strconv.ParseInt(cidClean[2:], 16, 64)
+		} else if eci, err = strconv.ParseInt(cidClean, 10, 64); err != nil {
+			eci, err = strconv.ParseInt(cidClean, 16, 64)
+		}
+		if err == nil && eci > 0 {
+			enb := int(eci >> 8)
+			sec := int(eci & 0xFF)
+			s.ENB = &enb
+			s.Sector = &sec
+		}
+	}
+
+	log.Printf("[router] Signal: RSRP=%v RSRQ=%v SINR=%v RSSI=%v CellID=%s Band=%s eNB=%s",
+		ptrStr(s.RSRP), ptrStr(s.RSRQ), ptrStr(s.SINR), ptrStr(s.RSSI), s.CellID, s.Band, ptrInt(s.ENB))
 	return s, nil
 }
 
@@ -341,11 +447,13 @@ func isAuthError(err error) bool {
 	return ae.code == "125002" || ae.code == "100003" || ae.code == "125001"
 }
 
-func firstNonEmpty(a, b string) string {
-	if a != "" {
-		return a
+func firstNonEmpty(items ...string) string {
+	for _, it := range items {
+		if it != "" {
+			return it
+		}
 	}
-	return b
+	return ""
 }
 
 func ptrStr(p *float64) string {
@@ -360,4 +468,11 @@ func safePrefix(s string, n int) string {
 		return s
 	}
 	return s[:n]
+}
+
+func ptrInt(p *int) string {
+	if p == nil {
+		return "nil"
+	}
+	return strconv.Itoa(*p)
 }

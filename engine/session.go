@@ -14,6 +14,7 @@ type Phase string
 
 const (
 	PhaseIdle     Phase = "IDLE"
+	PhaseHint     Phase = "HINT"
 	PhaseCoarse   Phase = "COARSE"
 	PhaseFineAz10 Phase = "FINE_AZ_10"
 	PhaseFineAz5  Phase = "FINE_AZ_5"
@@ -109,6 +110,8 @@ type SessionState struct {
 	LiveScore       float64      `json:"live_score"`
 	TotalPositions  int          `json:"total_positions"`
 	StepSize        int          `json:"step_size"`
+	TowerHint       string       `json:"tower_hint,omitempty"`
+	OfferFullScan   bool         `json:"offer_full_scan"`
 }
 
 // Session manages the alignment state machine.
@@ -138,6 +141,14 @@ type Session struct {
 	hillBest        *Position
 	positionCounter int
 
+	// Tower hint & shortened coarse
+	hasHint       bool
+	hintBearing   *float64
+	hintDistance  *float64
+	hintText      string
+	shortCoarse   bool
+	offerFullScan bool
+
 	// Live mode
 	liveScoreHistory []liveEntry
 	liveBestScore    float64
@@ -163,6 +174,51 @@ func NewSession(settleSeconds, measureSeconds int, onChange func()) *Session {
 	}
 }
 
+// SetTowerHint configures the serving tower bearing and distance.
+func (s *Session) SetTowerHint(bearingDeg, distM float64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.hasHint = true
+	s.hintBearing = &bearingDeg
+	s.hintDistance = &distM
+	s.hintText = fmt.Sprintf("Serving tower: ~%s, bearing %s",
+		FormatDistanceKM(distM), CompassText(bearingDeg))
+	s.notify()
+}
+
+// ClearTowerHint removes the serving tower hint.
+func (s *Session) ClearTowerHint() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.hasHint = false
+	s.hintBearing = nil
+	s.hintDistance = nil
+	s.hintText = ""
+	s.notify()
+}
+
+// RunFullScan forces a full 360° coarse scan (e.g. if shortened coarse scored <40).
+func (s *Session) RunFullScan() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.shortCoarse = false
+	s.offerFullScan = false
+	s.phase = PhaseCoarse
+	s.coarseCount = 0
+	s.currentAzStep = 0
+	s.instruction = Instruction{
+		Action: ActionHold,
+		Text:   "Measure at your starting position for full 360° scan",
+		Phase:  PhaseCoarse,
+	}
+	s.instruction.Progress.Current = 0
+	s.instruction.Progress.EstimatedTotal = 12
+	s.notify()
+}
+
 // Start begins a new session in the given mode.
 func (s *Session) Start(mode SessionMode) {
 	s.mu.Lock()
@@ -184,17 +240,33 @@ func (s *Session) Start(mode SessionMode) {
 	s.liveBestScore = 0
 	s.liveTrend = TrendSteady
 	s.liveScore = 0
+	s.offerFullScan = false
 
 	if mode == ModeGuided {
-		s.phase = PhaseCoarse
-		s.stepSize = 30
-		s.instruction = Instruction{
-			Action: ActionHold,
-			Text:   "Measure at your starting position",
-			Phase:  PhaseCoarse,
+		if s.hasHint && s.hintBearing != nil {
+			s.phase = PhaseHint
+			s.shortCoarse = true
+			s.stepSize = 30
+			s.instruction = Instruction{
+				Action: ActionHold,
+				Text:   fmt.Sprintf("Point the antenna toward %s (about %.0f°), then press Measure",
+					CompassDir(*s.hintBearing), *s.hintBearing),
+				Phase:  PhaseHint,
+			}
+			s.instruction.Progress.Current = 0
+			s.instruction.Progress.EstimatedTotal = 5
+		} else {
+			s.phase = PhaseCoarse
+			s.shortCoarse = false
+			s.stepSize = 30
+			s.instruction = Instruction{
+				Action: ActionHold,
+				Text:   "Measure at your starting position",
+				Phase:  PhaseCoarse,
+			}
+			s.instruction.Progress.Current = 0
+			s.instruction.Progress.EstimatedTotal = 12
 		}
-		s.instruction.Progress.Current = 0
-		s.instruction.Progress.EstimatedTotal = 12
 	} else if mode == ModeSpeed {
 		s.phase = PhaseIdle
 		s.instruction = Instruction{
@@ -405,6 +477,8 @@ func (s *Session) GetState() SessionState {
 		LiveScore:       math.Round(s.liveScore*10) / 10,
 		TotalPositions:  len(s.positions),
 		StepSize:        s.stepSize,
+		TowerHint:       s.hintText,
+		OfferFullScan:   s.offerFullScan,
 	}
 }
 
@@ -513,6 +587,8 @@ func (s *Session) finalizeMeasurement() {
 
 func (s *Session) advanceGuidedState() {
 	switch s.phase {
+	case PhaseHint:
+		s.advanceHint()
 	case PhaseCoarse:
 		s.advanceCoarse()
 	case PhaseFineAz10, PhaseFineAz5, PhaseRecheck:
@@ -522,10 +598,79 @@ func (s *Session) advanceGuidedState() {
 	}
 }
 
+func (s *Session) advanceHint() {
+	s.phase = PhaseCoarse
+	s.coarseCount = 1
+	// Next step is +30° relative to hint (step +1)
+	s.instruction = Instruction{
+		Action:    ActionTurnRight,
+		AmountDeg: 30,
+		Text:      "Turn RIGHT about 30°, then press Measure",
+		Phase:     PhaseCoarse,
+	}
+	s.instruction.Progress.Current = 1
+	s.instruction.Progress.EstimatedTotal = 5
+	s.currentAzStep = 1
+}
+
 func (s *Session) advanceCoarse() {
 	s.coarseCount++
-	total := 12
 
+	if s.shortCoarse {
+		total := 5
+		if s.coarseCount >= total {
+			best := s.findBestInPhase(PhaseCoarse)
+			if best != nil {
+				posCopy := *best
+				s.bestPosition = &posCopy
+			}
+			if best != nil && best.AvgScore < 40 {
+				s.offerFullScan = true
+				s.instruction = Instruction{
+					Action: ActionHold,
+					Text:   "Best signal score is below 40. You can run the full 360° scan or Skip to proceed.",
+					Phase:  PhaseCoarse,
+				}
+				s.instruction.Progress.Current = 5
+				s.instruction.Progress.EstimatedTotal = 5
+				return
+			}
+			s.transitionToPhase(PhaseFineAz10)
+			return
+		}
+
+		switch s.coarseCount {
+		case 2:
+			s.instruction = Instruction{
+				Action:    ActionTurnRight,
+				AmountDeg: 30,
+				Text:      "Turn RIGHT about 30° (to +60° from hint), then press Measure",
+				Phase:     PhaseCoarse,
+			}
+			s.currentAzStep = 2
+		case 3:
+			s.instruction = Instruction{
+				Action:    ActionTurnLeft,
+				AmountDeg: 90,
+				Text:      "Turn LEFT about 90° (to -30° from hint), then press Measure",
+				Phase:     PhaseCoarse,
+			}
+			s.currentAzStep = -1
+		case 4:
+			s.instruction = Instruction{
+				Action:    ActionTurnLeft,
+				AmountDeg: 30,
+				Text:      "Turn LEFT about 30° (to -60° from hint), then press Measure",
+				Phase:     PhaseCoarse,
+			}
+			s.currentAzStep = -2
+		}
+		s.instruction.Progress.Current = s.coarseCount
+		s.instruction.Progress.EstimatedTotal = total
+		return
+	}
+
+	total := 12
 	if s.coarseCount >= total {
 		// Find best coarse position
 		best := s.findBestInPhase(PhaseCoarse)
@@ -550,6 +695,7 @@ func (s *Session) advanceCoarse() {
 }
 
 func (s *Session) transitionToPhase(newPhase Phase) {
+	s.offerFullScan = false
 	s.phase = newPhase
 
 	switch newPhase {
@@ -794,7 +940,10 @@ func (s *Session) setTiltInstruction() {
 }
 
 func (s *Session) advanceToNextPhase() {
+	s.offerFullScan = false
 	switch s.phase {
+	case PhaseHint:
+		s.transitionToPhase(PhaseCoarse)
 	case PhaseCoarse:
 		s.transitionToPhase(PhaseFineAz10)
 	case PhaseFineAz10:
@@ -836,7 +985,7 @@ func (s *Session) finishSession() {
 func (s *Session) findBestInPhase(phase Phase) *Position {
 	var best *Position
 	for i := range s.positions {
-		if s.positions[i].Phase == phase {
+		if s.positions[i].Phase == phase || (phase == PhaseCoarse && s.positions[i].Phase == PhaseHint) {
 			if best == nil || s.positions[i].AvgScore > best.AvgScore {
 				best = &s.positions[i]
 			}
@@ -857,7 +1006,12 @@ func (s *Session) countPositionsInPhase(phase Phase) int {
 
 func (s *Session) estimateTotal(phase Phase) int {
 	switch phase {
+	case PhaseHint:
+		return 1
 	case PhaseCoarse:
+		if s.shortCoarse {
+			return 5
+		}
 		return 12
 	case PhaseFineAz10:
 		return 8

@@ -541,3 +541,291 @@ h3 {
     main { padding: 4px; }
     .card { padding: 12px; }
 }
+
+/* ===== Towers Map Panel Styles ===== */
+.banner.info {
+    background: rgba(33, 150, 243, 0.15);
+    border: 1px solid var(--accent);
+    color: var(--accent);
+}
+
+.full-scan-box {
+    margin-top: 16px;
+    padding: 12px;
+    border-radius: var(--radius);
+    background: rgba(255, 193, 7, 0.1);
+    border: 1px solid var(--warn);
+    text-align: center;
+}
+.full-scan-box p {
+    font-size: 14px;
+    color: var(--warn);
+    margin-bottom: 10px;
+}
+
+.tower-serving-card {
+    background: rgba(33, 150, 243, 0.08);
+    border: 1px solid var(--accent);
+    border-radius: var(--radius);
+    padding: 12px 16px;
+    margin-bottom: 12px;
+}
+
+.tower-serving-title {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--muted);
+    margin-bottom: 4px;
+}
+
+.serving-summary {
+    font-size: 17px;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 6px;
+}
+
+.tower-badges {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.badge-item {
+    font-size: 11px;
+    padding: 3px 8px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text);
+    font-weight: 600;
+}
+.badge-item.source-badge {
+    text-transform: uppercase;
+    background: rgba(33, 150, 243, 0.2);
+    color: var(--accent);
+}
+.badge-item.warn-badge {
+    background: rgba(255, 193, 7, 0.2);
+    color: var(--warn);
+}
+
+.location-box {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px;
+    margin-bottom: 12px;
+}
+
+.location-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+}
+
+.location-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+}
+
+.location-inputs {
+    display: flex;
+    gap: 6px;
+    margin-top: 8px;
+}
+
+.location-inputs input, .manual-form-grid input {
+    flex: 1;
+    min-width: 0;
+    padding: 10px;
+    font-size: 14px;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+.location-inputs input:focus, .manual-form-grid input:focus {
+    border-color: var(--accent);
+    outline: none;
+}
+
+.btn-sm {
+    min-height: 44px;
+    padding: 8px 14px;
+    font-size: 13px;
+    white-space: nowrap;
+}
+
+.tower-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+}
+
+.view-toggle-btns {
+    display: flex;
+    gap: 4px;
+    background: rgba(255, 255, 255, 0.05);
+    padding: 3px;
+    border-radius: 8px;
+}
+
+.toggle-btn {
+    padding: 8px 14px;
+    font-size: 13px;
+    font-weight: 600;
+    background: transparent;
+    border: none;
+    color: var(--muted);
+    border-radius: 6px;
+    cursor: pointer;
+    min-height: 44px;
+}
+.toggle-btn.active {
+    background: var(--accent);
+    color: #fff;
+}
+
+.toolbar-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.operator-toggle {
+    font-size: 12px;
+    color: var(--muted);
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.icon-tool-btn {
+    width: 44px;
+    height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 16px;
+    cursor: pointer;
+    color: var(--text);
+}
+.icon-tool-btn:hover { background: rgba(255, 255, 255, 0.1); }
+
+.radial-container {
+    width: 100%;
+    max-width: 360px;
+    margin: 0 auto 12px auto;
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: var(--radius);
+    padding: 8px;
+    display: flex;
+    justify-content: center;
+}
+
+#radial-svg {
+    width: 100%;
+    height: auto;
+    max-height: 320px;
+    user-select: none;
+}
+
+.map-container {
+    margin-bottom: 12px;
+    position: relative;
+}
+
+.map-fallback {
+    position: absolute;
+    bottom: 8px;
+    left: 8px;
+    right: 8px;
+    background: rgba(239, 68, 68, 0.9);
+    color: #fff;
+    padding: 6px 12px;
+    font-size: 12px;
+    border-radius: 6px;
+    text-align: center;
+    z-index: 1000;
+}
+
+.manual-tower-card {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px;
+    margin-bottom: 12px;
+}
+.manual-tower-card h4 {
+    margin: 0 0 8px 0;
+    font-size: 14px;
+}
+
+.manual-form-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    margin-bottom: 10px;
+}
+
+.tower-detail-card {
+    background: var(--bg);
+    border: 1px solid var(--accent);
+    border-radius: 12px;
+    padding: 12px;
+    margin-bottom: 12px;
+    animation: fadeIn 0.2s ease;
+}
+
+.tower-detail-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+}
+
+.close-btn {
+    background: none;
+    border: none;
+    color: var(--muted);
+    font-size: 16px;
+    cursor: pointer;
+    min-width: 44px;
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.tower-detail-content {
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--text);
+}
+
+.nearby-towers-list h4 {
+    margin: 8px 0;
+    font-size: 13px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.center { text-align: center; }
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+

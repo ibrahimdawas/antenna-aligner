@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <title>Antenna Aligner</title>
+    <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -21,6 +22,7 @@
     <nav id="mode-tabs">
         <button class="tab active" data-mode="guided">Guided</button>
         <button class="tab" data-mode="live">Live</button>
+        <button class="tab" data-mode="towers">Towers</button>
         <button class="tab" data-mode="speed">Speed Test</button>
     </nav>
 
@@ -29,6 +31,11 @@
         <!-- Router offline banner -->
         <div id="offline-banner" class="banner error hidden">
             <span id="offline-text">Router offline</span>
+        </div>
+
+        <!-- Serving tower hint banner in guided mode -->
+        <div id="guided-tower-hint" class="banner info hidden">
+            <span id="guided-tower-hint-text"></span>
         </div>
 
         <!-- Score display -->
@@ -67,6 +74,12 @@
                 </svg>
                 <span id="progress-text"></span>
             </div>
+
+            <!-- Low score offer full scan box -->
+            <div id="offer-full-scan-box" class="full-scan-box hidden">
+                <p>Signal score is low (&lt;40). Tower hint may be inaccurate.</p>
+                <button id="btn-full-scan" class="primary-btn">Run full 360° scan</button>
+            </div>
         </section>
 
         <!-- Live mode panel (hidden by default) -->
@@ -75,6 +88,112 @@
             <div id="live-trend-text">Steady</div>
             <div id="live-best">Best: --</div>
             <button id="mark-btn" class="primary-btn">Mark this position</button>
+        </section>
+
+        <!-- Towers Map Panel -->
+        <section id="towers-panel" class="card hidden">
+            <!-- Serving tower header -->
+            <div id="tower-serving-card" class="tower-serving-card">
+                <div class="tower-serving-title">Serving Tower</div>
+                <div id="serving-tower-summary" class="serving-summary">No serving tower resolved</div>
+                <div id="serving-tower-badges" class="tower-badges">
+                    <span id="badge-accuracy" class="badge-item hidden">±0m</span>
+                    <span id="badge-source" class="badge-item source-badge">manual</span>
+                    <span id="badge-offline" class="badge-item warn-badge hidden">Offline Cache</span>
+                </div>
+            </div>
+
+            <!-- Warning banner: tower not found -->
+            <div id="tower-not-found-banner" class="banner warn hidden">
+                <span>⚠️ Serving tower not found in database. Using full 360° scan.</span>
+            </div>
+
+            <!-- Location settings & empty state -->
+            <div id="location-box" class="location-box">
+                <div class="location-header">
+                    <span class="location-title">📍 Your Location</span>
+                    <button id="btn-use-gps" class="secondary-btn btn-sm">Use my location</button>
+                </div>
+                <div id="location-empty-msg" class="muted">Enter your location to compute tower distances and compass bearings.</div>
+                <div class="location-inputs">
+                    <input type="number" id="loc-lat" placeholder="Latitude (e.g. 32.89)" step="any">
+                    <input type="number" id="loc-lon" placeholder="Longitude (e.g. 13.19)" step="any">
+                    <button id="btn-save-loc" class="primary-btn btn-sm">Save</button>
+                </div>
+                <div id="loc-status" class="muted"></div>
+            </div>
+
+            <!-- View switch and actions toolbar -->
+            <div class="tower-toolbar">
+                <div class="view-toggle-btns">
+                    <button id="btn-view-radial" class="toggle-btn active">Radial View</button>
+                    <button id="btn-view-map" class="toggle-btn">Real Map</button>
+                </div>
+                <div class="toolbar-actions">
+                    <label class="operator-toggle">
+                        <input type="checkbox" id="chk-show-all-ops"> All operators
+                    </label>
+                    <button id="btn-refresh-towers" class="icon-tool-btn" title="Refresh database">🔄</button>
+                    <button id="btn-add-tower" class="icon-tool-btn" title="Add tower manually">➕</button>
+                </div>
+            </div>
+
+            <!-- Manual Add Tower Form -->
+            <div id="manual-tower-form" class="manual-tower-card hidden">
+                <h4>Add Tower Manually</h4>
+                <div class="manual-form-grid">
+                    <input type="number" id="man-lat" placeholder="Latitude (e.g. 32.892)" step="any">
+                    <input type="number" id="man-lon" placeholder="Longitude (e.g. 13.193)" step="any">
+                    <input type="number" id="man-enb" placeholder="eNB ID (e.g. 48225)">
+                    <input type="number" id="man-mcc" placeholder="MCC (e.g. 606)" value="606">
+                    <input type="number" id="man-mnc" placeholder="MNC (e.g. 1)" value="1">
+                    <input type="number" id="man-acc" placeholder="Accuracy meters" value="100">
+                </div>
+                <div class="button-row">
+                    <button id="btn-save-manual-tower" class="primary-btn btn-sm">Save Tower</button>
+                    <button id="btn-cancel-manual-tower" class="secondary-btn btn-sm">Cancel</button>
+                </div>
+            </div>
+
+            <!-- A. Radial Tower View (SVG) -->
+            <div id="radial-container" class="radial-container">
+                <svg id="radial-svg" viewBox="0 0 320 320"></svg>
+            </div>
+
+            <!-- B. Real Leaflet Map View -->
+            <div id="map-container" class="map-container hidden">
+                <div id="leaflet-map" style="width: 100%; height: 320px; border-radius: 12px;"></div>
+                <div id="map-fallback-notice" class="map-fallback hidden">Tile load failed. Reverted to Radial view.</div>
+            </div>
+
+            <!-- Selected Tower Detail Card -->
+            <div id="tower-detail-card" class="tower-detail-card hidden">
+                <div class="tower-detail-header">
+                    <strong id="td-title">Tower Details</strong>
+                    <button id="td-close" class="close-btn">✕</button>
+                </div>
+                <div id="td-content" class="tower-detail-content"></div>
+            </div>
+
+            <!-- Nearby towers list -->
+            <div class="nearby-towers-list">
+                <h4>Nearby Towers (<span id="nearby-count">0</span>)</h4>
+                <div class="table-scroll">
+                    <table id="nearby-table">
+                        <thead>
+                            <tr>
+                                <th>eNB</th>
+                                <th>Dist</th>
+                                <th>Bearing</th>
+                                <th>Source</th>
+                            </tr>
+                        </thead>
+                        <tbody id="nearby-body">
+                            <tr><td colspan="4" class="muted center">No towers in radius</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
         </section>
 
         <!-- Speed test panel (hidden by default) -->
@@ -167,6 +286,7 @@
         </section>
     </main>
 
+    <script src="vendor/leaflet/leaflet.js"></script>
     <script src="app.js"></script>
 </body>
 </html>

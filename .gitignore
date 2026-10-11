@@ -1,4 +1,5 @@
 config.json
+towers_cache.json
 antenna-aligner
 antenna-aligner.exe
 *.exe

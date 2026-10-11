@@ -16,6 +16,12 @@ type Sample struct {
 	CellID string    `json:"cell_id"`
 	PCI    string    `json:"pci"`
 	Band   string    `json:"band"`
+	MCC    *int      `json:"mcc,omitempty"`
+	MNC    *int      `json:"mnc,omitempty"`
+	ENB    *int      `json:"enb,omitempty"`
+	Sector *int      `json:"sector,omitempty"`
+	TAC    *int      `json:"tac,omitempty"`
+	PLMN   string    `json:"plmn,omitempty"`
 }
 
 // SignalSource abstracts over real and mock routers.

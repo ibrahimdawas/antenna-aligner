@@ -24,6 +24,15 @@
     let measureAnimFrame = null;
     let mockMode = false;
 
+    // Tower state
+    let towersData = null;
+    let activeTowerView = 'radial';
+    let selectedTower = null;
+    let leafletMap = null;
+    let leafletMarkers = [];
+    let currentTab = 'guided';
+    let showAllOperators = false;
+
     // --- DOM refs ---
     const $ = (sel) => document.querySelector(sel);
     const $$ = (sel) => document.querySelectorAll(sel);
@@ -35,6 +44,7 @@
         updateSoundUI();
         updateVibeUI();
         fetchState();
+        fetchTowers();
         connectSSE();
         bindEvents();
         requestWakeLock();
@@ -59,6 +69,9 @@
             }
             if (data.session) {
                 updateSession(data.session);
+            }
+            if (data.towers) {
+                updateTowersUI(data.towers);
             }
         } catch (e) {
             console.error('Failed to fetch initial state:', e);
@@ -88,6 +101,15 @@
                 updateSession(data);
             } catch (err) {
                 console.error('session parse error:', err);
+            }
+        });
+
+        eventSource.addEventListener('towers', function (e) {
+            try {
+                const data = JSON.parse(e.data);
+                updateTowersUI(data);
+            } catch (err) {
+                console.error('towers parse error:', err);
             }
         });
 
@@ -168,20 +190,47 @@
         state = s;
         instructionFiredThisTick = false;
 
-        // Mode tabs
-        $$('.tab').forEach(function (tab) {
-            tab.classList.toggle('active', tab.dataset.mode === s.mode);
-        });
-
         const isGuided = s.mode === 'guided';
         const isLive = s.mode === 'live';
         const isSpeed = s.mode === 'speed';
 
-        // Show/hide panels
-        $('#direction-panel').classList.toggle('hidden', !isGuided);
-        $('#live-panel').classList.toggle('hidden', !isLive);
-        $('#speed-panel').classList.toggle('hidden', !isSpeed);
-        $('#phase-section').classList.toggle('hidden', !isGuided);
+        if (currentTab !== 'towers') {
+            // Mode tabs
+            $$('.tab').forEach(function (tab) {
+                tab.classList.toggle('active', tab.dataset.mode === s.mode);
+            });
+
+            // Show/hide panels
+            $('#direction-panel').classList.toggle('hidden', !isGuided);
+            $('#live-panel').classList.toggle('hidden', !isLive);
+            $('#speed-panel').classList.toggle('hidden', !isSpeed);
+            $('#phase-section').classList.toggle('hidden', !isGuided);
+            $('#towers-panel').classList.add('hidden');
+        } else {
+            $$('.tab').forEach(function (tab) {
+                tab.classList.toggle('active', tab.dataset.mode === 'towers');
+            });
+            $('#direction-panel').classList.add('hidden');
+            $('#live-panel').classList.add('hidden');
+            $('#speed-panel').classList.add('hidden');
+            $('#phase-section').classList.add('hidden');
+            $('#towers-panel').classList.remove('hidden');
+        }
+
+        // Serving tower hint banner in guided mode
+        if (isGuided && s.tower_hint) {
+            $('#guided-tower-hint').classList.remove('hidden');
+            $('#guided-tower-hint-text').textContent = s.tower_hint;
+        } else {
+            $('#guided-tower-hint').classList.add('hidden');
+        }
+
+        // Low score offer full scan box
+        if (isGuided && s.offer_full_scan) {
+            $('#offer-full-scan-box').classList.remove('hidden');
+        } else {
+            $('#offer-full-scan-box').classList.add('hidden');
+        }
 
         if (isGuided) {
             updateDirectionPanel(s);
@@ -214,6 +263,11 @@
             if (coarse.length > 0) {
                 drawPolarChart(coarse, s.best_position);
             }
+        }
+
+        // Redraw radial heading pointer if radial view is visible
+        if (activeTowerView === 'radial') {
+            renderRadialTowerView();
         }
 
         // Measure button state
@@ -325,6 +379,7 @@
         if (!inst || !inst.progress) return;
 
         const phaseNames = {
+            'HINT': 'Tower Hint',
             'COARSE': 'Coarse Scan',
             'FINE_AZ_10': 'Fine Azimuth 10°',
             'FINE_AZ_5': 'Fine Azimuth 5°',
@@ -452,6 +507,7 @@
 
     function getStepDeg(phase) {
         switch (phase) {
+            case 'HINT': return 30;
             case 'COARSE': return 30;
             case 'FINE_AZ_10': return 10;
             case 'FINE_AZ_5': return 5;
@@ -565,6 +621,479 @@
         svg.innerHTML = html;
     }
 
+    // --- Navigation & Tabs ---
+    function setActiveTab(tabName) {
+        currentTab = tabName;
+        $$('.tab').forEach(function (t) {
+            t.classList.toggle('active', t.dataset.mode === tabName);
+        });
+
+        $('#towers-panel').classList.toggle('hidden', tabName !== 'towers');
+        $('#direction-panel').classList.toggle('hidden', tabName !== 'guided');
+        $('#phase-section').classList.toggle('hidden', tabName !== 'guided');
+        $('#live-panel').classList.toggle('hidden', tabName !== 'live');
+        $('#speed-panel').classList.toggle('hidden', tabName !== 'speed');
+
+        if (tabName === 'towers') {
+            if (activeTowerView === 'radial') {
+                renderRadialTowerView();
+            } else {
+                renderLeafletMap();
+                if (leafletMap) {
+                    setTimeout(function () { leafletMap.invalidateSize(); }, 100);
+                }
+            }
+        } else {
+            lastInstructionKey = null;
+            lastInstruction = null;
+            lastLiveBestScore = 0;
+            lastLiveTrend = 'STEADY';
+            postJSON('/api/session/start', { mode: tabName });
+        }
+    }
+
+    // --- Towers & Map Logic ---
+    async function fetchTowers(showAll) {
+        try {
+            const url = showAll ? '/api/towers?all=true' : '/api/towers';
+            const resp = await fetch(url);
+            const data = await resp.json();
+            updateTowersUI(data);
+        } catch (e) {
+            console.error('Failed to fetch towers:', e);
+        }
+    }
+
+    async function saveLocation(lat, lon) {
+        const res = await postJSON('/api/location', { lat: lat, lon: lon });
+        if (res && res.ok) {
+            $('#loc-status').textContent = 'Location saved!';
+            fetchTowers(showAllOperators);
+        } else {
+            $('#loc-status').textContent = 'Failed to save location: ' + ((res && res.error) || 'network error');
+        }
+    }
+
+    function updateTowersUI(tState) {
+        if (!tState) return;
+        towersData = tState;
+
+        // User location
+        if (tState.user_lat != null && tState.user_lon != null && (tState.user_lat !== 0 || tState.user_lon !== 0)) {
+            const latInput = $('#loc-lat');
+            const lonInput = $('#loc-lon');
+            if (document.activeElement !== latInput) latInput.value = tState.user_lat;
+            if (document.activeElement !== lonInput) lonInput.value = tState.user_lon;
+            $('#location-empty-msg').classList.add('hidden');
+            $('#loc-status').textContent = `Location set: ${tState.user_lat.toFixed(5)}, ${tState.user_lon.toFixed(5)}`;
+        } else {
+            $('#location-empty-msg').classList.remove('hidden');
+            $('#loc-status').textContent = '';
+        }
+
+        // Serving tower card
+        const serving = tState.serving;
+        if (serving) {
+            const distStr = serving.distance_m != null ? ` • ~${formatDist(serving.distance_m)}` : '';
+            const bearStr = serving.bearing_deg != null ? ` at ${Math.round(serving.bearing_deg)}° (${serving.compass_text || ''})` : '';
+            const bandStr = (serving.cells && serving.cells[0] && serving.cells[0].band) ? ` [${serving.cells[0].band}]` : '';
+            $('#serving-tower-summary').textContent = `eNB ${serving.enb}${distStr}${bearStr}${bandStr}`;
+
+            if (serving.accuracy > 0) {
+                $('#badge-accuracy').classList.remove('hidden');
+                $('#badge-accuracy').textContent = `±${serving.accuracy}m`;
+            } else {
+                $('#badge-accuracy').classList.add('hidden');
+            }
+
+            $('#badge-source').textContent = serving.source || 'manual';
+            $('#badge-source').classList.remove('hidden');
+
+            if (tState.offline) {
+                $('#badge-offline').classList.remove('hidden');
+            } else {
+                $('#badge-offline').classList.add('hidden');
+            }
+
+            $('#tower-not-found-banner').classList.add('hidden');
+        } else {
+            const curENB = (tState.serving_enb > 0) ? tState.serving_enb : (state && state.sample && state.sample.enb ? state.sample.enb : null);
+            const curCellID = tState.serving_cell_id || (state && state.sample && state.sample.cell_id ? state.sample.cell_id : '');
+
+            if (curENB || curCellID) {
+                const plmnStr = (state && state.sample && state.sample.plmn) ? ` • PLMN ${state.sample.plmn}` : '';
+                $('#serving-tower-summary').textContent = `eNB ${curENB || '--'} (Cell: ${curCellID})${plmnStr} • GPS Unknown`;
+                $('#tower-not-found-banner').classList.remove('hidden');
+                $('#tower-not-found-banner').innerHTML = `
+                    <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
+                        <span>⚠️ Serving tower eNB <strong>${curENB || '--'}</strong> position not in database.</span>
+                        <button id="btn-quick-add-serving" class="primary-btn btn-sm">➕ Set Location for eNB ${curENB || ''}</button>
+                    </div>
+                `;
+                const btnQuick = $('#btn-quick-add-serving');
+                if (btnQuick) {
+                    btnQuick.onclick = function() {
+                        openManualTowerModal(curENB);
+                    };
+                }
+            } else {
+                $('#serving-tower-summary').textContent = 'No serving tower resolved';
+                $('#tower-not-found-banner').classList.add('hidden');
+            }
+
+            $('#badge-accuracy').classList.add('hidden');
+            $('#badge-source').classList.add('hidden');
+            $('#badge-offline').classList.add('hidden');
+        }
+
+        // Render current view
+        if (activeTowerView === 'radial') {
+            renderRadialTowerView();
+        } else {
+            renderLeafletMap();
+        }
+
+        // Update nearby table
+        updateNearbyTable(tState.nearby || []);
+    }
+
+    function updateNearbyTable(nearby) {
+        const countEl = $('#nearby-count');
+        const tbody = $('#nearby-body');
+        if (countEl) countEl.textContent = nearby.length;
+
+        if (!nearby || nearby.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="4" class="muted center">No towers in radius</td></tr>';
+            return;
+        }
+
+        let html = '';
+        for (let i = 0; i < nearby.length; i++) {
+            const tw = nearby[i];
+            const isServing = tw.is_serving;
+            const star = isServing ? ' ⭐' : '';
+            html += `<tr data-tower-id="${tw.id || tw.enb}" style="cursor: pointer;">`;
+            html += `<td><strong>${tw.enb}${star}</strong></td>`;
+            html += `<td>${formatDist(tw.distance_m)}</td>`;
+            html += `<td>${Math.round(tw.bearing_deg)}° ${tw.compass_text || ''}</td>`;
+            html += `<td style="text-transform: capitalize;">${tw.source || 'manual'}</td>`;
+            html += `</tr>`;
+        }
+        tbody.innerHTML = html;
+    }
+
+    function formatDist(meters) {
+        if (meters == null || isNaN(meters)) return '--';
+        if (meters < 1000) return Math.round(meters) + ' m';
+        return (meters / 1000).toFixed(1) + ' km';
+    }
+
+    function distToRadius(m) {
+        if (m <= 0) return 0;
+        if (m <= 1000) return (m / 1000) * 30;
+        if (m <= 2000) return 30 + ((m - 1000) / 1000) * 30;
+        if (m <= 5000) return 60 + ((m - 2000) / 3000) * 35;
+        if (m <= 10000) return 95 + ((m - 5000) / 5000) * 35;
+        return 130; // clamped to outer rim
+    }
+
+    function renderRadialTowerView() {
+        const svg = $('#radial-svg');
+        if (!svg) return;
+
+        const cx = 160, cy = 160;
+        const maxR = 130;
+
+        let html = '';
+
+        // Rings: 1km (30px), 2km (60px), 5km (95px), 10km (130px)
+        const rings = [
+            { r: 30, label: '1k' },
+            { r: 60, label: '2k' },
+            { r: 95, label: '5k' },
+            { r: 130, label: '10k' }
+        ];
+
+        for (const ring of rings) {
+            html += `<circle cx="${cx}" cy="${cy}" r="${ring.r}" fill="none" stroke="rgba(128,128,128,0.2)" stroke-width="1"/>`;
+            const lblX = cx + ring.r * 0.707 + 2;
+            const lblY = cy - ring.r * 0.707 - 2;
+            html += `<text x="${lblX}" y="${lblY}" fill="var(--muted)" font-size="9" opacity="0.7">${ring.label}</text>`;
+        }
+
+        // Crosshairs (N-S, E-W)
+        html += `<line x1="${cx}" y1="${cy - maxR}" x2="${cx}" y2="${cy + maxR}" stroke="rgba(128,128,128,0.15)" stroke-width="1"/>`;
+        html += `<line x1="${cx - maxR}" y1="${cy}" x2="${cx + maxR}" y2="${cy}" stroke="rgba(128,128,128,0.15)" stroke-width="1"/>`;
+
+        // Compass cardinal labels
+        html += `<text x="${cx}" y="${cy - maxR - 8}" text-anchor="middle" dominant-baseline="middle" fill="var(--accent)" font-weight="700" font-size="12">N</text>`;
+        html += `<text x="${cx + maxR + 12}" y="${cy}" text-anchor="start" dominant-baseline="middle" fill="var(--muted)" font-size="11">E</text>`;
+        html += `<text x="${cx}" y="${cy + maxR + 12}" text-anchor="middle" dominant-baseline="middle" fill="var(--muted)" font-size="11">S</text>`;
+        html += `<text x="${cx - maxR - 12}" y="${cy}" text-anchor="end" dominant-baseline="middle" fill="var(--muted)" font-size="11">W</text>`;
+
+        // Center user marker
+        html += `<circle cx="${cx}" cy="${cy}" r="5" fill="var(--good)"/>`;
+        html += `<text x="${cx}" y="${cy + 14}" text-anchor="middle" fill="var(--muted)" font-size="9">You</text>`;
+
+        // Antenna heading pointer from guided session best position
+        if (state && state.best_position) {
+            const stepDeg = getStepDeg(state.best_position.phase);
+            const headingDeg = (state.best_position.azimuth_step * stepDeg) % 360;
+            const hRad = (headingDeg * Math.PI) / 180;
+            const hX = cx + (maxR * 0.85) * Math.sin(hRad);
+            const hY = cy - (maxR * 0.85) * Math.cos(hRad);
+            html += `<line x1="${cx}" y1="${cy}" x2="${hX}" y2="${hY}" stroke="var(--warn)" stroke-width="2" stroke-dasharray="4,2"/>`;
+            html += `<polygon points="${hX},${hY} ${hX - 4 * Math.cos(hRad)},${hY - 4 * Math.sin(hRad)} ${hX + 4 * Math.cos(hRad)},${hY + 4 * Math.sin(hRad)}" fill="var(--warn)"/>`;
+        }
+
+        // Draw nearby towers (hollow circles)
+        if (towersData && towersData.nearby) {
+            for (const tw of towersData.nearby) {
+                if (tw.is_serving) continue;
+                const rad = (tw.bearing_deg * Math.PI) / 180;
+                const r = distToRadius(tw.distance_m);
+                const x = cx + r * Math.sin(rad);
+                const y = cy - r * Math.cos(rad);
+
+                html += `<g class="tower-marker" data-tower-id="${tw.id || tw.enb}" style="cursor: pointer;">`;
+                html += `<circle cx="${x}" cy="${y}" r="5" fill="var(--bg, #111)" stroke="var(--text)" stroke-width="1.5"/>`;
+                html += `<text x="${x}" y="${y - 8}" text-anchor="middle" fill="var(--muted)" font-size="9">${tw.enb}</text>`;
+                html += `</g>`;
+            }
+        }
+
+        // Draw serving tower (filled dot + line)
+        if (towersData && towersData.serving) {
+            const srv = towersData.serving;
+            const sRad = (srv.bearing_deg * Math.PI) / 180;
+            const sR = distToRadius(srv.distance_m);
+            const sX = cx + sR * Math.sin(sRad);
+            const sY = cy - sR * Math.cos(sRad);
+
+            // Line from user to serving tower
+            html += `<line x1="${cx}" y1="${cy}" x2="${sX}" y2="${sY}" stroke="var(--accent)" stroke-width="2" stroke-dasharray="3,3"/>`;
+
+            // Serving tower dot
+            html += `<g class="tower-marker serving-marker" data-tower-id="${srv.id || srv.enb}" style="cursor: pointer;">`;
+            html += `<circle cx="${sX}" cy="${sY}" r="7" fill="var(--accent)" stroke="#ffffff" stroke-width="2"/>`;
+            const band = (srv.cells && srv.cells[0] && srv.cells[0].band) ? ` (${srv.cells[0].band})` : '';
+            html += `<text x="${sX}" y="${sY - 10}" text-anchor="middle" fill="var(--accent)" font-weight="700" font-size="10">eNB ${srv.enb}${band}</text>`;
+            html += `<text x="${sX}" y="${sY + 16}" text-anchor="middle" fill="var(--text)" font-size="9">${formatDist(srv.distance_m)}</text>`;
+            html += `</g>`;
+        }
+
+        svg.innerHTML = html;
+    }
+
+    function renderLeafletMap() {
+        if (typeof L === 'undefined') return;
+
+        const container = $('#map-container');
+        if (!container || container.classList.contains('hidden')) return;
+
+        const hasUserLoc = towersData && towersData.user_lat != null && towersData.user_lon != null && (towersData.user_lat !== 0 || towersData.user_lon !== 0);
+        const centerLat = hasUserLoc ? towersData.user_lat : 32.8908;
+        const centerLon = hasUserLoc ? towersData.user_lon : 13.1796;
+
+        if (!leafletMap) {
+            leafletMap = L.map('leaflet-map').setView([centerLat, centerLon], hasUserLoc ? 14 : 5);
+            const tileLayer = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                maxZoom: 19,
+                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+            }).addTo(leafletMap);
+
+            tileLayer.on('tileerror', function () {
+                const notice = $('#map-fallback-notice');
+                if (notice) {
+                    notice.classList.remove('hidden');
+                    setTimeout(function () {
+                        notice.classList.add('hidden');
+                        switchTowerView('radial');
+                    }, 3000);
+                }
+            });
+        }
+
+        leafletMap.invalidateSize();
+
+        // Clear previous markers
+        for (const m of leafletMarkers) {
+            m.remove();
+        }
+        leafletMarkers = [];
+
+        const bounds = [];
+
+        // User position marker
+        if (towersData && towersData.user_lat != null && towersData.user_lon != null && (towersData.user_lat !== 0 || towersData.user_lon !== 0)) {
+            const userMarker = L.circleMarker([towersData.user_lat, towersData.user_lon], {
+                radius: 7,
+                fillColor: '#22c55e',
+                color: '#ffffff',
+                weight: 2,
+                opacity: 1,
+                fillOpacity: 1
+            }).addTo(leafletMap).bindTooltip('Your Antenna');
+            leafletMarkers.push(userMarker);
+            bounds.push([towersData.user_lat, towersData.user_lon]);
+        }
+
+        // Nearby towers
+        if (towersData && towersData.nearby) {
+            for (const tw of towersData.nearby) {
+                if (tw.is_serving) continue;
+                const m = L.circleMarker([tw.lat, tw.lon], {
+                    radius: 6,
+                    fillColor: '#1e293b',
+                    color: '#94a3b8',
+                    weight: 2,
+                    opacity: 1,
+                    fillOpacity: 0.9
+                }).addTo(leafletMap).bindTooltip(`eNB ${tw.enb} (~${formatDist(tw.distance_m)})`);
+                m.on('click', function () { showTowerDetails(tw); });
+                leafletMarkers.push(m);
+                bounds.push([tw.lat, tw.lon]);
+            }
+        }
+
+        // Serving tower
+        if (towersData && towersData.serving) {
+            const srv = towersData.serving;
+            const sm = L.circleMarker([srv.lat, srv.lon], {
+                radius: 8,
+                fillColor: '#3b82f6',
+                color: '#ffffff',
+                weight: 2,
+                opacity: 1,
+                fillOpacity: 1
+            }).addTo(leafletMap).bindTooltip(`Serving: eNB ${srv.enb} (~${formatDist(srv.distance_m)})`);
+            sm.on('click', function () { showTowerDetails(srv); });
+            leafletMarkers.push(sm);
+            bounds.push([srv.lat, srv.lon]);
+
+            // Line from user to serving tower
+            if (towersData.user_lat != null && (towersData.user_lat !== 0 || towersData.user_lon !== 0)) {
+                const line = L.polyline([
+                    [towersData.user_lat, towersData.user_lon],
+                    [srv.lat, srv.lon]
+                ], {
+                    color: '#3b82f6',
+                    weight: 2,
+                    dashArray: '4, 4'
+                }).addTo(leafletMap);
+                leafletMarkers.push(line);
+            }
+        }
+
+        if (bounds.length > 1) {
+            try {
+                leafletMap.fitBounds(bounds, { padding: [30, 30], maxZoom: 15 });
+            } catch (e) {}
+        } else if (bounds.length === 1) {
+            leafletMap.setView(bounds[0], 14);
+        }
+    }
+
+    function openManualTowerModal(enb) {
+        const form = $('#manual-tower-form');
+        if (!form) return;
+        form.classList.remove('hidden');
+        if (enb) {
+            $('#man-enb').value = enb;
+        } else if (state && state.sample && state.sample.enb > 0) {
+            $('#man-enb').value = state.sample.enb;
+        }
+        if (state && state.sample) {
+            if (state.sample.mcc > 0) $('#man-mcc').value = state.sample.mcc;
+            if (state.sample.mnc != null) $('#man-mnc').value = state.sample.mnc;
+        }
+        if (towersData && towersData.user_lat != null && (towersData.user_lat !== 0 || towersData.user_lon !== 0)) {
+            if (!$('#man-lat').value) $('#man-lat').value = towersData.user_lat;
+            if (!$('#man-lon').value) $('#man-lon').value = towersData.user_lon;
+        }
+        form.scrollIntoView({ behavior: 'smooth' });
+    }
+
+    function switchTowerView(view) {
+        activeTowerView = view;
+        $('#btn-view-radial').classList.toggle('active', view === 'radial');
+        $('#btn-view-map').classList.toggle('active', view === 'map');
+        $('#radial-container').classList.toggle('hidden', view !== 'radial');
+        $('#map-container').classList.toggle('hidden', view !== 'map');
+
+        if (view === 'radial') {
+            renderRadialTowerView();
+        } else {
+            renderLeafletMap();
+            if (leafletMap) {
+                setTimeout(function () { leafletMap.invalidateSize(); }, 50);
+            }
+        }
+    }
+
+    function findTowerById(id) {
+        if (!towersData) return null;
+        if (towersData.serving && (towersData.serving.id === id || String(towersData.serving.enb) === String(id))) {
+            return towersData.serving;
+        }
+        if (towersData.nearby) {
+            return towersData.nearby.find(function (t) {
+                return t.id === id || String(t.enb) === String(id);
+            }) || null;
+        }
+        return null;
+    }
+
+    function showTowerDetails(tw) {
+        if (!tw) return;
+        selectedTower = tw;
+        const card = $('#tower-detail-card');
+        if (!card) return;
+
+        $('#td-title').textContent = `eNB ${tw.enb} ${tw.is_serving ? '(Serving)' : ''}`;
+
+        const distStr = formatDist(tw.distance_m);
+        const bearStr = `${Math.round(tw.bearing_deg || 0)}° (${tw.compass_text || ''})`;
+        const accStr = tw.accuracy > 0 ? `±${tw.accuracy}m` : 'Unknown';
+        const srcStr = tw.source || 'manual';
+        const coordsStr = `${tw.lat.toFixed(5)}, ${tw.lon.toFixed(5)}`;
+
+        // Approximate Free Space Path Loss estimate (rough sanity check for 1800 MHz)
+        let fsplStr = '--';
+        if (tw.distance_m > 0) {
+            const distKm = tw.distance_m / 1000;
+            const fspl = 32.44 + (20 * Math.log10(distKm)) + (20 * Math.log10(1800));
+            fsplStr = `~${Math.round(fspl)} dB (1.8GHz ref)`;
+        }
+
+        let cellsHtml = '';
+        if (tw.cells && tw.cells.length > 0) {
+            cellsHtml = '<div style="margin-top:6px;"><strong>Cells / Sectors:</strong><ul style="margin:4px 0;padding-left:18px;">';
+            for (const c of tw.cells) {
+                cellsHtml += `<li>Sector ${c.sector} ${c.band ? '• Band ' + c.band : ''} ${c.pci ? '• PCI ' + c.pci : ''}</li>`;
+            }
+            cellsHtml += '</ul></div>';
+        }
+
+        const html = `
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 8px;">
+                <div><span style="color:var(--muted)">Distance:</span> <strong>${distStr}</strong></div>
+                <div><span style="color:var(--muted)">Bearing:</span> <strong>${bearStr}</strong></div>
+                <div><span style="color:var(--muted)">Coordinates:</span> <strong>${coordsStr}</strong></div>
+                <div><span style="color:var(--muted)">Accuracy:</span> <strong>${accStr}</strong></div>
+                <div><span style="color:var(--muted)">PLMN:</span> <strong>${tw.mcc || '--'}-${tw.mnc || '--'}</strong></div>
+                <div><span style="color:var(--muted)">Source:</span> <strong style="text-transform: capitalize;">${srcStr}</strong></div>
+            </div>
+            <div style="font-size: 11px; color: var(--muted); margin-bottom: 6px;">
+                Free-Space Path Loss estimate: ${fsplStr}
+            </div>
+            ${cellsHtml}
+        `;
+
+        $('#td-content').innerHTML = html;
+        card.classList.remove('hidden');
+    }
+
     // --- Event binding ---
     function bindEvents() {
         // Global unlock on first user interaction for Web Audio autoplay policy
@@ -576,11 +1105,7 @@
             tab.addEventListener('click', function () {
                 unlockAudio();
                 const mode = this.dataset.mode;
-                lastInstructionKey = null;
-                lastInstruction = null;
-                lastLiveBestScore = 0;
-                lastLiveTrend = 'STEADY';
-                postJSON('/api/session/start', { mode: mode });
+                setActiveTab(mode);
             });
         });
 
@@ -715,6 +1240,187 @@
                 postJSON('/api/mock/move', { direction: this.dataset.move });
             });
         });
+
+        // Towers panel controls:
+        // 1. Location
+        const btnSaveLoc = $('#btn-save-loc');
+        if (btnSaveLoc) {
+            btnSaveLoc.addEventListener('click', function () {
+                const lat = parseFloat($('#loc-lat').value);
+                const lon = parseFloat($('#loc-lon').value);
+                if (isNaN(lat) || isNaN(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+                    $('#loc-status').textContent = 'Please enter valid coordinates (-90 to 90, -180 to 180)';
+                    return;
+                }
+                saveLocation(lat, lon);
+            });
+        }
+
+        const btnUseGPS = $('#btn-use-gps');
+        if (btnUseGPS) {
+            btnUseGPS.addEventListener('click', function () {
+                if (!('geolocation' in navigator)) {
+                    $('#loc-status').textContent = 'Geolocation not supported. Enter coordinates manually.';
+                    return;
+                }
+                $('#loc-status').textContent = 'Requesting GPS position…';
+                navigator.geolocation.getCurrentPosition(
+                    function (pos) {
+                        const lat = pos.coords.latitude;
+                        const lon = pos.coords.longitude;
+                        $('#loc-lat').value = lat.toFixed(6);
+                        $('#loc-lon').value = lon.toFixed(6);
+                        saveLocation(lat, lon);
+                    },
+                    function (err) {
+                        $('#loc-status').textContent = 'Geolocation unavailable (requires HTTPS or localhost). Please enter coordinates manually.';
+                    },
+                    { enableHighAccuracy: true, timeout: 10000 }
+                );
+            });
+        }
+
+        // 2. View toggles
+        const btnRadial = $('#btn-view-radial');
+        if (btnRadial) {
+            btnRadial.addEventListener('click', function () {
+                switchTowerView('radial');
+            });
+        }
+
+        const btnMap = $('#btn-view-map');
+        if (btnMap) {
+            btnMap.addEventListener('click', function () {
+                switchTowerView('map');
+            });
+        }
+
+        // 3. Operators filter
+        const chkOps = $('#chk-show-all-ops');
+        if (chkOps) {
+            chkOps.addEventListener('change', function () {
+                showAllOperators = this.checked;
+                fetchTowers(showAllOperators);
+            });
+        }
+
+        // 4. Refresh database
+        const btnRefresh = $('#btn-refresh-towers');
+        if (btnRefresh) {
+            btnRefresh.addEventListener('click', async function () {
+                const btn = this;
+                btn.style.opacity = '0.5';
+                const res = await postJSON('/api/towers/refresh', {});
+                btn.style.opacity = '1';
+                if (res && !res.ok && res.error) {
+                    $('#loc-status').textContent = res.error;
+                } else {
+                    fetchTowers(showAllOperators);
+                }
+            });
+        }
+
+        // 5. Manual tower entry form
+        const btnAddTower = $('#btn-add-tower');
+        if (btnAddTower) {
+            btnAddTower.addEventListener('click', function () {
+                const form = $('#manual-tower-form');
+                if (form.classList.contains('hidden')) {
+                    openManualTowerModal();
+                } else {
+                    form.classList.add('hidden');
+                }
+            });
+        }
+
+        const btnCancelManual = $('#btn-cancel-manual-tower');
+        if (btnCancelManual) {
+            btnCancelManual.addEventListener('click', function () {
+                $('#manual-tower-form').classList.add('hidden');
+            });
+        }
+
+        const btnSaveManual = $('#btn-save-manual-tower');
+        if (btnSaveManual) {
+            btnSaveManual.addEventListener('click', async function () {
+                const lat = parseFloat($('#man-lat').value);
+                const lon = parseFloat($('#man-lon').value);
+                const enb = parseInt($('#man-enb').value, 10);
+                const curMcc = (state && state.sample && state.sample.mcc) ? state.sample.mcc : 606;
+                const curMnc = (state && state.sample && state.sample.mnc != null) ? state.sample.mnc : 1;
+                const mcc = parseInt($('#man-mcc').value, 10) || curMcc;
+                const mnc = parseInt($('#man-mnc').value, 10) || curMnc;
+                const acc = parseInt($('#man-acc').value, 10) || 100;
+
+                if (isNaN(lat) || isNaN(lon) || isNaN(enb) || enb <= 0) {
+                    alert('Please enter valid latitude, longitude, and eNB ID.');
+                    return;
+                }
+
+                const payload = {
+                    lat: lat,
+                    lon: lon,
+                    enb: enb,
+                    mcc: mcc,
+                    mnc: mnc,
+                    accuracy: acc,
+                    source: 'manual'
+                };
+
+                const res = await postJSON('/api/towers/manual', payload);
+                if (res && res.ok) {
+                    $('#manual-tower-form').classList.add('hidden');
+                    fetchTowers(showAllOperators);
+                } else {
+                    alert('Failed to save tower: ' + ((res && res.error) || 'unknown error'));
+                }
+            });
+        }
+
+        // 6. Close tower details card
+        const btnCloseTD = $('#td-close');
+        if (btnCloseTD) {
+            btnCloseTD.addEventListener('click', function () {
+                $('#tower-detail-card').classList.add('hidden');
+                selectedTower = null;
+            });
+        }
+
+        // 7. Click delegation for Radial SVG markers
+        const radialSvg = $('#radial-svg');
+        if (radialSvg) {
+            radialSvg.addEventListener('click', function (e) {
+                const marker = e.target.closest('[data-tower-id]');
+                if (!marker) return;
+                const tid = marker.dataset.towerId;
+                const tw = findTowerById(tid);
+                if (tw) {
+                    showTowerDetails(tw);
+                }
+            });
+        }
+
+        // 8. Click delegation for nearby table rows
+        const nearbyBody = $('#nearby-body');
+        if (nearbyBody) {
+            nearbyBody.addEventListener('click', function (e) {
+                const row = e.target.closest('tr[data-tower-id]');
+                if (!row) return;
+                const tid = row.dataset.towerId;
+                const tw = findTowerById(tid);
+                if (tw) {
+                    showTowerDetails(tw);
+                }
+            });
+        }
+
+        // 9. Full scan offer button in guided mode
+        const btnFullScan = $('#btn-full-scan');
+        if (btnFullScan) {
+            btnFullScan.addEventListener('click', function () {
+                postJSON('/api/session/full-scan', {});
+            });
+        }
     }
 
     // --- API helpers ---
@@ -729,8 +1435,10 @@
             if (!data.ok) {
                 console.error('API error:', data.error);
             }
+            return data;
         } catch (e) {
             console.error('Request failed:', e);
+            return null;
         }
     }
 

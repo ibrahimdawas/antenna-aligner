@@ -84,10 +84,18 @@ func (m *MockSource) FetchSample() (*Sample, error) {
 	rssi := clampF(rsrp+20+noise(1), -120, -25)
 
 	// Simulate tower switch if very far from best
-	cellID := "mock-12345"
+	cellID := "12345678" // eNB 48225, sector 78
+	enb := 48225
+	sector := 78
 	if math.Abs(headingDiff) > 120 {
-		cellID = "mock-67890"
+		cellID = "12345934" // eNB 48226, sector 78
+		enb = 48226
+		sector = 78
 	}
+
+	mcc := 606
+	mnc := 1
+	tac := 1000
 
 	return &Sample{
 		Time:   time.Now(),
@@ -98,6 +106,12 @@ func (m *MockSource) FetchSample() (*Sample, error) {
 		CellID: cellID,
 		PCI:    "100",
 		Band:   "B3",
+		MCC:    &mcc,
+		MNC:    &mnc,
+		ENB:    &enb,
+		Sector: &sector,
+		TAC:    &tac,
+		PLMN:   "60601",
 	}, nil
 }
 
