@@ -465,13 +465,17 @@ func getTowersState(showAll bool) towers.TowersState {
 	towersMu.RLock()
 	defer towersMu.RUnlock()
 
-	var userLat, userLon *float64
+	var userLat, userLon, userAcc *float64
 	hasLoc := cfg.HasLocation()
 	if hasLoc {
 		lat := cfg.Location.Lat
 		lon := cfg.Location.Lon
 		userLat = &lat
 		userLon = &lon
+		if cfg.Location.Accuracy != nil {
+			acc := *cfg.Location.Accuracy
+			userAcc = &acc
+		}
 	}
 
 	latestSample := ringBuf.Latest()
@@ -487,6 +491,7 @@ func getTowersState(showAll bool) towers.TowersState {
 	state := towers.TowersState{
 		UserLat:       userLat,
 		UserLon:       userLon,
+		UserAccuracy:  userAcc,
 		SourceName:    cfg.TowerSource,
 		Serving:       lastServingTower,
 		ServingCellID: servingCellID,
@@ -725,8 +730,9 @@ func handleLocationPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Lat float64 `json:"lat"`
-		Lon float64 `json:"lon"`
+		Lat      float64  `json:"lat"`
+		Lon      float64  `json:"lon"`
+		Accuracy *float64 `json:"accuracy,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
@@ -738,7 +744,7 @@ func handleLocationPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg.Location = &LocationConfig{Lat: req.Lat, Lon: req.Lon}
+	cfg.Location = &LocationConfig{Lat: req.Lat, Lon: req.Lon, Accuracy: req.Accuracy}
 	if err := SaveConfig(resolvedConfigPath, cfg); err != nil {
 		log.Printf("Failed to save config: %v", err)
 	}

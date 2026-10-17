@@ -121,6 +121,13 @@
                     <button id="btn-save-loc" class="primary-btn btn-sm">Save</button>
                 </div>
                 <div id="loc-status" class="muted"></div>
+                <div id="loc-accuracy-warning" class="banner warn hidden" style="margin-top: 8px;">
+                    <span id="loc-accuracy-msg"></span>
+                    <div style="margin-top: 6px; display: flex; gap: 8px;">
+                        <button id="btn-gps-save-low" class="primary-btn btn-sm">Save Anyway</button>
+                        <button id="btn-gps-retry" class="secondary-btn btn-sm">Retry GPS</button>
+                    </div>
+                </div>
             </div>
 
             <!-- View switch and actions toolbar -->
@@ -133,6 +140,7 @@
                     <label class="operator-toggle">
                         <input type="checkbox" id="chk-show-all-ops"> All operators
                     </label>
+                    <button id="btn-recenter-map" class="icon-tool-btn" title="Recenter map on your location & towers">🎯</button>
                     <button id="btn-refresh-towers" class="icon-tool-btn" title="Refresh database">🔄</button>
                     <button id="btn-add-tower" class="icon-tool-btn" title="Add tower manually">➕</button>
                 </div>

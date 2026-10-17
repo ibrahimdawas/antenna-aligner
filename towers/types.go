@@ -45,6 +45,7 @@ type TowerSource interface {
 type TowersState struct {
 	UserLat       *float64           `json:"user_lat"`
 	UserLon       *float64           `json:"user_lon"`
+	UserAccuracy  *float64           `json:"user_accuracy,omitempty"`
 	Serving       *TowerWithBearing  `json:"serving"`
 	ServingCellID string             `json:"serving_cell_id,omitempty"`
 	ServingENB    int                `json:"serving_enb,omitempty"`

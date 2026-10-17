@@ -7,8 +7,9 @@ import (
 
 // LocationConfig holds the user's antenna position.
 type LocationConfig struct {
-	Lat float64 `json:"lat"`
-	Lon float64 `json:"lon"`
+	Lat      float64  `json:"lat"`
+	Lon      float64  `json:"lon"`
+	Accuracy *float64 `json:"accuracy,omitempty"`
 }
 
 // Config holds all application settings.

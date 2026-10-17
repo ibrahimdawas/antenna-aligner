@@ -30,8 +30,18 @@
     let selectedTower = null;
     let leafletMap = null;
     let leafletMarkers = [];
+    let leafletMapHasFitBounds = false;
+    let lastFittedUserLat = null;
+    let lastFittedUserLon = null;
+    let lastFittedServingId = null;
+    let consecutiveTileErrors = 0;
+    let totalTilesLoaded = 0;
     let currentTab = 'guided';
     let showAllOperators = false;
+    let gpsWatchId = null;
+    let gpsTimeoutId = null;
+    let bestGpsFix = null;
+    let pendingLowAccFix = null;
 
     // --- DOM refs ---
     const $ = (sel) => document.querySelector(sel);
@@ -664,10 +674,17 @@
         }
     }
 
-    async function saveLocation(lat, lon) {
-        const res = await postJSON('/api/location', { lat: lat, lon: lon });
+    async function saveLocation(lat, lon, accuracy) {
+        const payload = { lat: lat, lon: lon };
+        if (accuracy != null && !isNaN(accuracy)) {
+            payload.accuracy = accuracy;
+        }
+        const res = await postJSON('/api/location', payload);
         if (res && res.ok) {
-            $('#loc-status').textContent = 'Location saved!';
+            const accStr = (accuracy != null && !isNaN(accuracy)) ? ` (±${Math.round(accuracy)}m)` : '';
+            $('#loc-status').textContent = `Location saved!${accStr}`;
+            const warnEl = $('#loc-accuracy-warning');
+            if (warnEl) warnEl.classList.add('hidden');
             fetchTowers(showAllOperators);
         } else {
             $('#loc-status').textContent = 'Failed to save location: ' + ((res && res.error) || 'network error');
@@ -685,7 +702,8 @@
             if (document.activeElement !== latInput) latInput.value = tState.user_lat;
             if (document.activeElement !== lonInput) lonInput.value = tState.user_lon;
             $('#location-empty-msg').classList.add('hidden');
-            $('#loc-status').textContent = `Location set: ${tState.user_lat.toFixed(5)}, ${tState.user_lon.toFixed(5)}`;
+            const accStr = (tState.user_accuracy != null && tState.user_accuracy > 0) ? ` (±${Math.round(tState.user_accuracy)}m)` : '';
+            $('#loc-status').textContent = `Location set: ${tState.user_lat.toFixed(5)}, ${tState.user_lon.toFixed(5)}${accStr}`;
         } else {
             $('#location-empty-msg').classList.remove('hidden');
             $('#loc-status').textContent = '';
@@ -835,7 +853,7 @@
         html += `<circle cx="${cx}" cy="${cy}" r="5" fill="var(--good)"/>`;
         html += `<text x="${cx}" y="${cy + 14}" text-anchor="middle" fill="var(--muted)" font-size="9">You</text>`;
 
-        // Antenna heading pointer from guided session best position
+        // Antenna heading pointer from guided session best position (labeled relative)
         if (state && state.best_position) {
             const stepDeg = getStepDeg(state.best_position.phase);
             const headingDeg = (state.best_position.azimuth_step * stepDeg) % 360;
@@ -844,6 +862,7 @@
             const hY = cy - (maxR * 0.85) * Math.cos(hRad);
             html += `<line x1="${cx}" y1="${cy}" x2="${hX}" y2="${hY}" stroke="var(--warn)" stroke-width="2" stroke-dasharray="4,2"/>`;
             html += `<polygon points="${hX},${hY} ${hX - 4 * Math.cos(hRad)},${hY - 4 * Math.sin(hRad)} ${hX + 4 * Math.cos(hRad)},${hY + 4 * Math.sin(hRad)}" fill="var(--warn)"/>`;
+            html += `<text x="${hX}" y="${hY < cy ? hY - 6 : hY + 12}" text-anchor="middle" fill="var(--warn)" font-size="8">Best (Relative)</text>`;
         }
 
         // Draw nearby towers (hollow circles)
@@ -885,7 +904,7 @@
         svg.innerHTML = html;
     }
 
-    function renderLeafletMap() {
+    function renderLeafletMap(forceRecenter) {
         if (typeof L === 'undefined') return;
 
         const container = $('#map-container');
@@ -902,15 +921,31 @@
                 attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
             }).addTo(leafletMap);
 
+            tileLayer.on('tileload', function () {
+                consecutiveTileErrors = 0;
+                totalTilesLoaded++;
+            });
+
             tileLayer.on('tileerror', function () {
-                const notice = $('#map-fallback-notice');
-                if (notice) {
-                    notice.classList.remove('hidden');
-                    setTimeout(function () {
-                        notice.classList.add('hidden');
-                        switchTowerView('radial');
-                    }, 3000);
+                consecutiveTileErrors++;
+                if (consecutiveTileErrors >= 6 && totalTilesLoaded === 0) {
+                    const notice = $('#map-fallback-notice');
+                    if (notice) {
+                        notice.classList.remove('hidden');
+                        setTimeout(function () {
+                            notice.classList.add('hidden');
+                            switchTowerView('radial');
+                        }, 3000);
+                    }
                 }
+            });
+
+            leafletMap.on('click', function (e) {
+                const lat = e.latlng.lat;
+                const lon = e.latlng.lng;
+                $('#loc-lat').value = lat.toFixed(6);
+                $('#loc-lon').value = lon.toFixed(6);
+                saveLocation(lat, lon, null);
             });
         }
 
@@ -926,6 +961,7 @@
 
         // User position marker
         if (towersData && towersData.user_lat != null && towersData.user_lon != null && (towersData.user_lat !== 0 || towersData.user_lon !== 0)) {
+            const accText = (towersData.user_accuracy != null && towersData.user_accuracy > 0) ? ` ±${Math.round(towersData.user_accuracy)}m` : '';
             const userMarker = L.circleMarker([towersData.user_lat, towersData.user_lon], {
                 radius: 7,
                 fillColor: '#22c55e',
@@ -933,9 +969,22 @@
                 weight: 2,
                 opacity: 1,
                 fillOpacity: 1
-            }).addTo(leafletMap).bindTooltip('Your Antenna');
+            }).addTo(leafletMap).bindTooltip(`Your Antenna (${towersData.user_lat.toFixed(5)}, ${towersData.user_lon.toFixed(5)}${accText})`);
             leafletMarkers.push(userMarker);
             bounds.push([towersData.user_lat, towersData.user_lon]);
+
+            // Accuracy circle if accuracy is known
+            if (towersData.user_accuracy != null && towersData.user_accuracy > 0) {
+                const accCircle = L.circle([towersData.user_lat, towersData.user_lon], {
+                    radius: towersData.user_accuracy,
+                    color: '#22c55e',
+                    fillColor: '#22c55e',
+                    fillOpacity: 0.12,
+                    weight: 1,
+                    dashArray: '3, 3'
+                }).addTo(leafletMap);
+                leafletMarkers.push(accCircle);
+            }
         }
 
         // Nearby towers
@@ -952,7 +1001,10 @@
                 }).addTo(leafletMap).bindTooltip(`eNB ${tw.enb} (~${formatDist(tw.distance_m)})`);
                 m.on('click', function () { showTowerDetails(tw); });
                 leafletMarkers.push(m);
-                bounds.push([tw.lat, tw.lon]);
+                // Exclude unreliable towers from bounds
+                if (!tw.unreliable && tw.distance_m <= 50000) {
+                    bounds.push([tw.lat, tw.lon]);
+                }
             }
         }
 
@@ -969,7 +1021,9 @@
             }).addTo(leafletMap).bindTooltip(`Serving: eNB ${srv.enb} (~${formatDist(srv.distance_m)})`);
             sm.on('click', function () { showTowerDetails(srv); });
             leafletMarkers.push(sm);
-            bounds.push([srv.lat, srv.lon]);
+            if (!srv.unreliable && srv.distance_m <= 50000) {
+                bounds.push([srv.lat, srv.lon]);
+            }
 
             // Line from user to serving tower
             if (towersData.user_lat != null && (towersData.user_lat !== 0 || towersData.user_lon !== 0)) {
@@ -985,12 +1039,24 @@
             }
         }
 
-        if (bounds.length > 1) {
-            try {
-                leafletMap.fitBounds(bounds, { padding: [30, 30], maxZoom: 15 });
-            } catch (e) {}
-        } else if (bounds.length === 1) {
-            leafletMap.setView(bounds[0], 14);
+        const userLocChanged = (towersData && (towersData.user_lat !== lastFittedUserLat || towersData.user_lon !== lastFittedUserLon));
+        const currentServingId = (towersData && towersData.serving) ? (towersData.serving.id || towersData.serving.enb) : null;
+        const servingChanged = (currentServingId !== lastFittedServingId);
+        const shouldFitBounds = forceRecenter || !leafletMapHasFitBounds || userLocChanged || servingChanged;
+
+        if (shouldFitBounds) {
+            leafletMapHasFitBounds = true;
+            lastFittedUserLat = towersData ? towersData.user_lat : null;
+            lastFittedUserLon = towersData ? towersData.user_lon : null;
+            lastFittedServingId = currentServingId;
+
+            if (bounds.length > 1) {
+                try {
+                    leafletMap.fitBounds(bounds, { padding: [30, 30], maxZoom: 15 });
+                } catch (e) {}
+            } else if (bounds.length === 1) {
+                leafletMap.setView(bounds[0], 14);
+            }
         }
     }
 
@@ -1256,27 +1322,141 @@
             });
         }
 
-        const btnUseGPS = $('#btn-use-gps');
-        if (btnUseGPS) {
-            btnUseGPS.addEventListener('click', function () {
-                if (!('geolocation' in navigator)) {
-                    $('#loc-status').textContent = 'Geolocation not supported. Enter coordinates manually.';
+        function stopGpsWatch() {
+            if (gpsWatchId !== null) {
+                navigator.geolocation.clearWatch(gpsWatchId);
+                gpsWatchId = null;
+            }
+            if (gpsTimeoutId !== null) {
+                clearTimeout(gpsTimeoutId);
+                gpsTimeoutId = null;
+            }
+        }
+
+        function startGpsCapture() {
+            if (!('geolocation' in navigator)) {
+                $('#loc-status').textContent = 'Geolocation not supported. Enter coordinates manually.';
+                return;
+            }
+            if (window.isSecureContext === false) {
+                $('#loc-status').textContent = 'Geolocation unavailable (requires HTTPS or localhost). Please enter coordinates manually.';
+                return;
+            }
+
+            stopGpsWatch();
+            bestGpsFix = null;
+            pendingLowAccFix = null;
+            const warnEl = $('#loc-accuracy-warning');
+            if (warnEl) warnEl.classList.add('hidden');
+            $('#loc-status').textContent = 'Acquiring GPS position…';
+
+            const startTime = Date.now();
+            const maxDurationMs = 15000;
+
+            function evaluateFinalFix() {
+                stopGpsWatch();
+                if (!bestGpsFix) {
+                    $('#loc-status').textContent = 'Could not obtain a GPS fix. Please enter manually.';
                     return;
                 }
-                $('#loc-status').textContent = 'Requesting GPS position…';
-                navigator.geolocation.getCurrentPosition(
-                    function (pos) {
-                        const lat = pos.coords.latitude;
-                        const lon = pos.coords.longitude;
-                        $('#loc-lat').value = lat.toFixed(6);
-                        $('#loc-lon').value = lon.toFixed(6);
-                        saveLocation(lat, lon);
-                    },
-                    function (err) {
-                        $('#loc-status').textContent = 'Geolocation unavailable (requires HTTPS or localhost). Please enter coordinates manually.';
-                    },
-                    { enableHighAccuracy: true, timeout: 10000 }
-                );
+
+                const lat = bestGpsFix.coords.latitude;
+                const lon = bestGpsFix.coords.longitude;
+                const acc = bestGpsFix.coords.accuracy;
+
+                $('#loc-lat').value = lat.toFixed(6);
+                $('#loc-lon').value = lon.toFixed(6);
+
+                if (acc > 200) {
+                    pendingLowAccFix = { lat: lat, lon: lon, acc: acc };
+                    const msgEl = $('#loc-accuracy-msg');
+                    if (msgEl) msgEl.textContent = `Low accuracy (±${Math.round(acc)} m). Save anyway?`;
+                    if (warnEl) warnEl.classList.remove('hidden');
+                    $('#loc-status').textContent = `Coarse fix obtained (±${Math.round(acc)} m).`;
+                } else {
+                    $('#loc-status').textContent = `GPS fix obtained (±${Math.round(acc)} m). Saving…`;
+                    saveLocation(lat, lon, acc);
+                }
+            }
+
+            gpsTimeoutId = setTimeout(evaluateFinalFix, maxDurationMs);
+
+            gpsWatchId = navigator.geolocation.watchPosition(
+                function (pos) {
+                    const acc = pos.coords.accuracy;
+                    const elapsedSec = Math.round((Date.now() - startTime) / 1000);
+                    const remainingSec = Math.max(0, 15 - elapsedSec);
+
+                    if (!bestGpsFix || acc < bestGpsFix.coords.accuracy) {
+                        bestGpsFix = pos;
+                    }
+
+                    const bestAcc = bestGpsFix.coords.accuracy;
+                    $('#loc-status').textContent = `Acquiring GPS… best: ±${Math.round(bestAcc)} m (${remainingSec}s)`;
+
+                    if (bestAcc <= 30) {
+                        evaluateFinalFix();
+                    }
+                },
+                function (err) {
+                    stopGpsWatch();
+                    let msg = '';
+                    switch (err.code) {
+                        case 1:
+                            msg = 'Permission denied. Allow location for this site.';
+                            break;
+                        case 2:
+                            msg = 'Position unavailable.';
+                            break;
+                        case 3:
+                            msg = 'Timed out. Move outdoors or enter manually.';
+                            break;
+                        default:
+                            msg = 'Geolocation error: ' + (err.message || 'Unknown error');
+                    }
+                    if (window.isSecureContext === false) {
+                        msg += ' (Requires HTTPS or localhost)';
+                    }
+                    $('#loc-status').textContent = msg;
+                },
+                { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 }
+            );
+        }
+
+        const btnUseGPS = $('#btn-use-gps');
+        if (btnUseGPS) {
+            btnUseGPS.addEventListener('click', startGpsCapture);
+        }
+
+        const btnGpsSaveLow = $('#btn-gps-save-low');
+        if (btnGpsSaveLow) {
+            btnGpsSaveLow.addEventListener('click', function () {
+                if (pendingLowAccFix) {
+                    const warnEl = $('#loc-accuracy-warning');
+                    if (warnEl) warnEl.classList.add('hidden');
+                    saveLocation(pendingLowAccFix.lat, pendingLowAccFix.lon, pendingLowAccFix.acc);
+                    pendingLowAccFix = null;
+                }
+            });
+        }
+
+        const btnGpsRetry = $('#btn-gps-retry');
+        if (btnGpsRetry) {
+            btnGpsRetry.addEventListener('click', function () {
+                const warnEl = $('#loc-accuracy-warning');
+                if (warnEl) warnEl.classList.add('hidden');
+                pendingLowAccFix = null;
+                startGpsCapture();
+            });
+        }
+
+        const btnRecenter = $('#btn-recenter-map');
+        if (btnRecenter) {
+            btnRecenter.addEventListener('click', function () {
+                if (activeTowerView !== 'map') {
+                    switchTowerView('map');
+                }
+                renderLeafletMap(true);
             });
         }
 
