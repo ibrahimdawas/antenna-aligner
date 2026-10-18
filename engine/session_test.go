@@ -8,7 +8,7 @@ import (
 
 func TestSessionGuidedLandscape(t *testing.T) {
 	// Settle: 0, Measure: 0 for synchronous test simulation
-	sess := NewSession(0, 0, nil)
+	sess := NewSession(0, 0, 60, nil)
 	sess.Start(ModeGuided)
 
 	state := sess.GetState()
@@ -47,7 +47,7 @@ func TestSessionGuidedLandscape(t *testing.T) {
 }
 
 func TestSessionNoiseImmunity(t *testing.T) {
-	sess := NewSession(0, 0, nil)
+	sess := NewSession(0, 0, 60, nil)
 	sess.Start(ModeGuided)
 
 	// Complete coarse quickly
@@ -79,7 +79,7 @@ func TestSessionNoiseImmunity(t *testing.T) {
 }
 
 func TestSessionWithTowerHint(t *testing.T) {
-	sess := NewSession(0, 0, nil)
+	sess := NewSession(0, 0, 60, nil)
 	// Known tower at 2.4 km, bearing 135° (SE)
 	sess.SetTowerHint(135.0, 2400.0)
 
@@ -136,7 +136,7 @@ func TestSessionWithTowerHint(t *testing.T) {
 }
 
 func TestSessionShortCoarseLowScoreOfferFullScan(t *testing.T) {
-	sess := NewSession(0, 0, nil)
+	sess := NewSession(0, 0, 60, nil)
 	sess.SetTowerHint(90.0, 5000.0)
 	sess.Start(ModeGuided)
 
@@ -168,4 +168,114 @@ func TestSessionShortCoarseLowScoreOfferFullScan(t *testing.T) {
 		t.Errorf("expected full 12-position scan, got %d", state.Instruction.Progress.EstimatedTotal)
 	}
 }
+
+func TestDynamicSettle(t *testing.T) {
+	// Settle: 10s, Measure: 5s
+	sess := NewSession(10, 5, 60, nil)
+	sess.Start(ModeGuided)
+
+	sess.StartMeasure()
+	state := sess.GetState()
+	if state.MeasureState != MeasureSettling {
+		t.Fatalf("expected MeasureSettling, got %v", state.MeasureState)
+	}
+
+	// Send 3 consecutive samples with SINR differing by < 1.0 dB
+	s1 := 10.0
+	s2 := 10.4
+	s3 := 10.2
+	sess.AddSample(&router.Sample{SINR: &s1})
+	sess.AddSample(&router.Sample{SINR: &s2})
+	sess.AddSample(&router.Sample{SINR: &s3})
+
+	state = sess.GetState()
+	// Should have transitioned to MeasureCollecting early due to dynamic settle
+	if state.MeasureState != MeasureCollecting {
+		t.Fatalf("expected early transition to MeasureCollecting, got %v", state.MeasureState)
+	}
+}
+
+func TestStaleDetection(t *testing.T) {
+	sess := NewSession(0, 0, 60, nil)
+	sess.Start(ModeGuided)
+
+	// Send 5 identical sample values with separate allocations
+	for i := 0; i < 4; i++ {
+		s := 12.0
+		r := -85.0
+		sess.AddSample(&router.Sample{SINR: &s, RSRP: &r})
+		state := sess.GetState()
+		if state.StaleWarning {
+			t.Fatalf("did not expect stale warning at %d samples", i+1)
+		}
+	}
+
+	// 5th identical sample triggers stale warning
+	s5 := 12.0
+	r5 := -85.0
+	sess.AddSample(&router.Sample{SINR: &s5, RSRP: &r5})
+	state := sess.GetState()
+	if !state.StaleWarning {
+		t.Fatalf("expected stale warning at 5 identical samples")
+	}
+
+	// Differing sample clears stale warning
+	sinr2 := 14.0
+	r6 := -85.0
+	sess.AddSample(&router.Sample{SINR: &sinr2, RSRP: &r6})
+	state = sess.GetState()
+	if state.StaleWarning {
+		t.Fatalf("expected stale warning to clear on changing sample")
+	}
+}
+
+func TestBandSwitchAndHighVariance(t *testing.T) {
+	sess := NewSession(0, 10, 60, nil)
+	sess.Start(ModeGuided)
+
+	sess.StartMeasure()
+	// Sample 1: Band 3, SINR 5
+	s1 := 5.0
+	r1 := -90.0
+	sess.AddSample(&router.Sample{SINR: &s1, RSRP: &r1, Band: "B3", CellID: "cell-1"})
+
+	// Sample 2: Band 20, SINR 15 (spread is 10 dB > 4 dB)
+	s2 := 15.0
+	r2 := -88.0
+	sess.AddSample(&router.Sample{SINR: &s2, RSRP: &r2, Band: "B20", CellID: "cell-1"})
+
+	sess.mu.Lock()
+	sess.finalizeMeasurement()
+	sess.mu.Unlock()
+
+	state := sess.GetState()
+	if len(state.Positions) != 1 {
+		t.Fatalf("expected 1 position, got %d", len(state.Positions))
+	}
+	pos := state.Positions[0]
+	if !pos.BandSwitch {
+		t.Errorf("expected BandSwitch to be true")
+	}
+	if !pos.HighVariance {
+		t.Errorf("expected HighVariance to be true (spread %.1f > 4.0)", pos.SINRSpread)
+	}
+	if pos.SINRSpread != 10.0 {
+		t.Errorf("expected SINRSpread 10.0, got %.1f", pos.SINRSpread)
+	}
+}
+
+func TestBeamwidthDerivedStepSizes(t *testing.T) {
+	// Narrow beamwidth antenna: 30°
+	sess := NewSession(0, 0, 30, nil)
+	sess.Start(ModeGuided)
+
+	state := sess.GetState()
+	if state.StepSize != 15 {
+		t.Errorf("expected coarse step 15 for 30° beamwidth, got %d", state.StepSize)
+	}
+	if state.BeamwidthDeg != 30 {
+		t.Errorf("expected BeamwidthDeg 30, got %d", state.BeamwidthDeg)
+	}
+}
+
 

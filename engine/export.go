@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"time"
 )
 
 // ExportCSV writes all positions as CSV with UTF-8 BOM for Excel compatibility.
@@ -21,7 +22,7 @@ func ExportCSV(positions []Position, w io.Writer) error {
 	if err := cw.Write([]string{
 		"ID", "Phase", "Azimuth Step", "Azimuth Deg", "Tilt Step", "Tilt Deg",
 		"Avg Score", "Avg RSRP", "Avg SINR", "Avg RSRQ",
-		"Cell ID", "Tower Switch", "Sample Count", "Time",
+		"Cell ID", "Band", "Tower Switch", "Band Switch", "High Variance", "SINR Spread", "Sample Count", "Time",
 	}); err != nil {
 		return err
 	}
@@ -42,9 +43,13 @@ func ExportCSV(positions []Position, w io.Writer) error {
 			ptrFmt(p.AvgSINR),
 			ptrFmt(p.AvgRSRQ),
 			p.CellID,
+			p.Band,
 			strconv.FormatBool(p.TowerSwitch),
+			strconv.FormatBool(p.BandSwitch),
+			strconv.FormatBool(p.HighVariance),
+			fmt.Sprintf("%.1f", p.SINRSpread),
 			strconv.Itoa(p.SampleCount),
-			p.Time.Format("2006-01-02 15:04:05"),
+			p.Time.Format(time.RFC3339),
 		}
 		if err := cw.Write(row); err != nil {
 			return err
@@ -71,6 +76,8 @@ func stepDegForPhase(phase Phase) int {
 		return 5
 	case PhaseTilt:
 		return 5
+	case PhaseVerify:
+		return 30
 	default:
 		return 1
 	}

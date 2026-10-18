@@ -272,7 +272,7 @@ func main() {
 	ringBuf = NewRingBuffer(300)
 
 	// Create session
-	session = engine.NewSession(cfg.SettleSeconds, cfg.MeasureSeconds, func() {
+	session = engine.NewSession(cfg.SettleSeconds, cfg.MeasureSeconds, cfg.BeamwidthDeg, func() {
 		state := session.GetState()
 		broadcaster.BroadcastSession(state)
 	})

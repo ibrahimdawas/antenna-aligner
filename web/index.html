@@ -38,6 +38,16 @@
             <span id="guided-tower-hint-text"></span>
         </div>
 
+        <!-- Stale data warning banner (P2) -->
+        <div id="stale-banner" class="banner warning hidden">
+            <span>⚠️ Router readings appear frozen/cached (5+ identical polls).</span>
+        </div>
+
+        <!-- Drift warning banner (P3) -->
+        <div id="drift-banner" class="banner warning hidden">
+            <span id="drift-text">⚠️ Signal conditions changed during scan — results may be unreliable.</span>
+        </div>
+
         <!-- Score display -->
         <section id="score-section" class="card">
             <div id="big-score" class="score-unknown">--</div>
@@ -269,6 +279,7 @@
                             <th>Score</th>
                             <th>RSRP</th>
                             <th>SINR</th>
+                            <th>Band</th>
                             <th></th>
                         </tr>
                     </thead>

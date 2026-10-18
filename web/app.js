@@ -235,6 +235,26 @@
             $('#guided-tower-hint').classList.add('hidden');
         }
 
+        // Stale data warning banner (P2)
+        const staleBanner = $('#stale-banner');
+        if (staleBanner) {
+            staleBanner.classList.toggle('hidden', !s.stale_warning);
+        }
+
+        // Drift warning banner (P3)
+        const driftBanner = $('#drift-banner');
+        if (driftBanner) {
+            if (s.drift_warning) {
+                driftBanner.classList.remove('hidden');
+                const driftText = $('#drift-text');
+                if (driftText && s.drift_delta != null) {
+                    driftText.textContent = `⚠️ Conditions changed during scan (${s.drift_delta > 0 ? '+' : ''}${s.drift_delta} pts verification drift) — results may be unreliable.`;
+                }
+            } else {
+                driftBanner.classList.add('hidden');
+            }
+        }
+
         // Low score offer full scan box
         if (isGuided && s.offer_full_scan) {
             $('#offer-full-scan-box').classList.remove('hidden');
@@ -395,6 +415,7 @@
             'FINE_AZ_5': 'Fine Azimuth 5°',
             'TILT': 'Tilt Adjustment',
             'RECHECK': 'Final Check',
+            'VERIFY': 'Drift Verification',
             'DONE': 'Complete',
             'IDLE': 'Idle'
         };
@@ -488,12 +509,11 @@
     function updatePositionsTable(s) {
         const tbody = $('#positions-body');
         if (!s.positions || s.positions.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--muted)">No measurements yet</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--muted)">No measurements yet</td></tr>';
             return;
         }
 
         const bestId = s.best_position ? s.best_position.id : -1;
-        const stepSize = s.step_size || 30;
 
         let html = '';
         for (let i = 0; i < s.positions.length; i++) {
@@ -502,6 +522,19 @@
             const azDeg = p.azimuth_step * getStepDeg(p.phase);
             const tiltDeg = p.tilt_step * 5;
 
+            // Flags / warnings
+            let flags = '';
+            if (p.tower_switch) {
+                flags += '<span title="Serving cell changed during measurement">🏰⚠</span> ';
+            }
+            if (p.band_switch) {
+                flags += '<span title="Frequency band switched during measurement">🔄</span> ';
+            }
+            if (p.high_variance) {
+                const spreadText = p.sinr_spread != null ? ' (spread: ' + p.sinr_spread.toFixed(1) + ' dB)' : '';
+                flags += '<span title="High SINR variance' + spreadText + '">⚡</span> ';
+            }
+
             html += '<tr class="' + (isBest ? 'best-row' : '') + '">';
             html += '<td>' + p.id + '</td>';
             html += '<td>' + azDeg + '°</td>';
@@ -509,7 +542,8 @@
             html += '<td>' + p.avg_score.toFixed(1) + '</td>';
             html += '<td>' + fmtPtr(p.avg_rsrp) + '</td>';
             html += '<td>' + fmtPtr(p.avg_sinr) + '</td>';
-            html += '<td>' + (p.tower_switch ? '⚠' : '') + '</td>';
+            html += '<td>' + (p.band || '--') + '</td>';
+            html += '<td>' + flags + '</td>';
             html += '</tr>';
         }
         tbody.innerHTML = html;
@@ -523,6 +557,7 @@
             case 'FINE_AZ_5': return 5;
             case 'TILT': return 5;
             case 'RECHECK': return 5;
+            case 'VERIFY': return 5;
             default: return 1;
         }
     }

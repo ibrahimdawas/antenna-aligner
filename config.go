@@ -21,6 +21,7 @@ type Config struct {
 	PollIntervalMs int    `json:"poll_interval_ms"`
 	SettleSeconds  int    `json:"settle_seconds"`
 	MeasureSeconds int    `json:"measure_seconds"`
+	BeamwidthDeg   int    `json:"beamwidth_deg,omitempty"`
 
 	// Tower map settings
 	Location       *LocationConfig `json:"location,omitempty"`
@@ -40,6 +41,7 @@ func DefaultConfig() Config {
 		PollIntervalMs: 1000,
 		SettleSeconds:  5,
 		MeasureSeconds: 12,
+		BeamwidthDeg:   60,
 		TowerSource:    "manual",
 		TowerRadiusM:   10000,
 	}

@@ -20,6 +20,7 @@ const (
 	PhaseFineAz5  Phase = "FINE_AZ_5"
 	PhaseTilt     Phase = "TILT"
 	PhaseRecheck  Phase = "RECHECK"
+	PhaseVerify   Phase = "VERIFY"
 	PhaseDone     Phase = "DONE"
 )
 
@@ -66,18 +67,22 @@ const (
 
 // Position represents one measured antenna position.
 type Position struct {
-	ID          int       `json:"id"`
-	Phase       Phase     `json:"phase"`
-	AzimuthStep int       `json:"azimuth_step"`
-	TiltStep    int       `json:"tilt_step"`
-	AvgScore    float64   `json:"avg_score"`
-	AvgRSRP     *float64  `json:"avg_rsrp"`
-	AvgSINR     *float64  `json:"avg_sinr"`
-	AvgRSRQ     *float64  `json:"avg_rsrq"`
-	CellID      string    `json:"cell_id"`
-	TowerSwitch bool      `json:"tower_switch"`
-	SampleCount int       `json:"sample_count"`
-	Time        time.Time `json:"time"`
+	ID           int       `json:"id"`
+	Phase        Phase     `json:"phase"`
+	AzimuthStep  int       `json:"azimuth_step"`
+	TiltStep     int       `json:"tilt_step"`
+	AvgScore     float64   `json:"avg_score"`
+	AvgRSRP      *float64  `json:"avg_rsrp"`
+	AvgSINR      *float64  `json:"avg_sinr"`
+	AvgRSRQ      *float64  `json:"avg_rsrq"`
+	CellID       string    `json:"cell_id"`
+	Band         string    `json:"band"`
+	TowerSwitch  bool      `json:"tower_switch"`
+	BandSwitch   bool      `json:"band_switch"`
+	HighVariance bool      `json:"high_variance"`
+	SINRSpread   float64   `json:"sinr_spread"`
+	SampleCount  int       `json:"sample_count"`
+	Time         time.Time `json:"time"`
 }
 
 // Instruction tells the UI what to do next.
@@ -112,6 +117,11 @@ type SessionState struct {
 	StepSize        int          `json:"step_size"`
 	TowerHint       string       `json:"tower_hint,omitempty"`
 	OfferFullScan   bool         `json:"offer_full_scan"`
+	StaleWarning    bool         `json:"stale_warning"`
+	DriftWarning    bool         `json:"drift_warning"`
+	DriftDelta      float64      `json:"drift_delta"`
+	ReferenceScore  float64      `json:"reference_score"`
+	BeamwidthDeg    int          `json:"beamwidth_deg"`
 }
 
 // Session manages the alignment state machine.
@@ -155,6 +165,20 @@ type Session struct {
 	liveTrend        LiveTrend
 	liveScore        float64
 
+	// P1: Dynamic settle detection — track SINR during settling
+	settleSINRHistory []float64
+
+	// P2: Stale-value detection
+	prevSample   *router.Sample
+	staleCount   int
+	staleWarning bool
+
+	// P3: Drift verification — reference position from start of scan
+	referencePosition *Position
+
+	// P5: Beamwidth-derived step sizes
+	beamwidthDeg int
+
 	onChange func()
 }
 
@@ -164,10 +188,15 @@ type liveEntry struct {
 }
 
 // NewSession creates a new session with the given timing parameters.
-func NewSession(settleSeconds, measureSeconds int, onChange func()) *Session {
+// beamwidthDeg controls the coarse step size (default 60 → 30° steps).
+func NewSession(settleSeconds, measureSeconds, beamwidthDeg int, onChange func()) *Session {
+	if beamwidthDeg <= 0 {
+		beamwidthDeg = 60
+	}
 	return &Session{
 		settleSeconds:  settleSeconds,
 		measureSeconds: measureSeconds,
+		beamwidthDeg:   beamwidthDeg,
 		phase:          PhaseIdle,
 		measureState:   MeasureIdle,
 		onChange:        onChange,
@@ -241,12 +270,18 @@ func (s *Session) Start(mode SessionMode) {
 	s.liveTrend = TrendSteady
 	s.liveScore = 0
 	s.offerFullScan = false
+	s.settleSINRHistory = nil
+	s.prevSample = nil
+	s.staleCount = 0
+	s.staleWarning = false
+	s.referencePosition = nil
 
 	if mode == ModeGuided {
+		coarseStep := s.coarseStep()
 		if s.hasHint && s.hintBearing != nil {
 			s.phase = PhaseHint
 			s.shortCoarse = true
-			s.stepSize = 30
+			s.stepSize = coarseStep
 			s.instruction = Instruction{
 				Action: ActionHold,
 				Text:   fmt.Sprintf("Point the antenna toward %s (about %.0f°), then press Measure",
@@ -258,7 +293,7 @@ func (s *Session) Start(mode SessionMode) {
 		} else {
 			s.phase = PhaseCoarse
 			s.shortCoarse = false
-			s.stepSize = 30
+			s.stepSize = coarseStep
 			s.instruction = Instruction{
 				Action: ActionHold,
 				Text:   "Measure at your starting position",
@@ -295,13 +330,39 @@ func (s *Session) AddSample(sample *router.Sample) {
 		return
 	}
 
+	// P2: Stale-value detection (flag if identical signal metrics for >= 5 polls)
+	if s.prevSample != nil && samplesAreIdentical(s.prevSample, sample) {
+		s.staleCount++
+	} else {
+		s.staleCount = 1
+	}
+	if s.staleCount >= 5 {
+		if !s.staleWarning {
+			s.staleWarning = true
+			s.notify()
+		}
+	} else {
+		if s.staleWarning {
+			s.staleWarning = false
+			s.notify()
+		}
+	}
+	sampleCopy := *sample
+	s.prevSample = &sampleCopy
+
 	switch s.measureState {
 	case MeasureSettling:
+		if sample.SINR != nil {
+			s.settleSINRHistory = append(s.settleSINRHistory, *sample.SINR)
+		}
 		elapsed := time.Since(s.measureStart).Seconds()
-		if elapsed >= float64(s.settleSeconds) {
+		// P1: Dynamic settle detection: if >=3 samples and SINR converged (<1.0 dB spread), early exit
+		earlySettle := len(s.settleSINRHistory) >= 3 && settleConverged(s.settleSINRHistory, 3, 1.0)
+		if elapsed >= float64(s.settleSeconds) || earlySettle {
 			s.measureState = MeasureCollecting
 			s.measureStart = time.Now()
 			s.collectSamples = nil
+			s.settleSINRHistory = nil
 			s.notify()
 		}
 		// Discard samples during settling
@@ -369,6 +430,7 @@ func (s *Session) StartMeasure() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	s.settleSINRHistory = nil
 	if s.settleSeconds <= 0 {
 		s.measureState = MeasureCollecting
 	} else {
@@ -390,7 +452,12 @@ func (s *Session) Remeasure() {
 			s.coarseCount--
 		}
 	}
-	s.measureState = MeasureSettling
+	s.settleSINRHistory = nil
+	if s.settleSeconds <= 0 {
+		s.measureState = MeasureCollecting
+	} else {
+		s.measureState = MeasureSettling
+	}
 	s.measureStart = time.Now()
 	s.collectSamples = nil
 	s.notify()
@@ -449,6 +516,11 @@ func (s *Session) Reset() {
 	s.liveBestScore = 0
 	s.liveTrend = TrendSteady
 	s.liveScore = 0
+	s.settleSINRHistory = nil
+	s.prevSample = nil
+	s.staleCount = 0
+	s.staleWarning = false
+	s.referencePosition = nil
 	s.notify()
 }
 
@@ -459,6 +531,26 @@ func (s *Session) GetState() SessionState {
 
 	positions := make([]Position, len(s.positions))
 	copy(positions, s.positions)
+
+	var refScore float64
+	if s.referencePosition != nil {
+		refScore = s.referencePosition.AvgScore
+	}
+
+	var driftWarn bool
+	var driftDelta float64
+	if s.phase == PhaseDone && s.referencePosition != nil && s.bestPosition != nil {
+		// Compare verification re-test if available
+		for _, p := range s.positions {
+			if p.Phase == PhaseVerify {
+				driftDelta = math.Round((p.AvgScore-s.bestPosition.AvgScore)*10) / 10
+				if math.Abs(p.AvgScore-s.bestPosition.AvgScore) > 5.0 {
+					driftWarn = true
+				}
+				break
+			}
+		}
+	}
 
 	return SessionState{
 		Mode:            s.mode,
@@ -479,6 +571,11 @@ func (s *Session) GetState() SessionState {
 		StepSize:        s.stepSize,
 		TowerHint:       s.hintText,
 		OfferFullScan:   s.offerFullScan,
+		StaleWarning:    s.staleWarning,
+		DriftWarning:    driftWarn,
+		DriftDelta:      driftDelta,
+		ReferenceScore:  refScore,
+		BeamwidthDeg:    s.beamwidthDeg,
 	}
 }
 
@@ -551,32 +648,52 @@ func (s *Session) finalizeMeasurement() {
 
 	avgScore := ScoreFromValues(avgRSRP, avgSINR, avgRSRQ)
 
-	// Check for tower switch
+	// Check for tower and band switch (P4)
 	firstCell := samples[0].CellID
 	lastCell := samples[len(samples)-1].CellID
 	towerSwitch := firstCell != "" && lastCell != "" && firstCell != lastCell
 
+	firstBand := samples[0].Band
+	lastBand := samples[len(samples)-1].Band
+	bandSwitch := firstBand != "" && lastBand != "" && firstBand != lastBand
+
+	// P6: SINR spread and high-variance detection (> 4.0 dB spread)
+	spread := sinrSpread(samples)
+	highVariance := spread > 4.0
+
 	s.positionCounter++
 	pos := Position{
-		ID:          s.positionCounter,
-		Phase:       s.phase,
-		AzimuthStep: s.currentAzStep,
-		TiltStep:    s.currentTiltStep,
-		AvgScore:    math.Round(avgScore*10) / 10,
-		AvgRSRP:     avgRSRP,
-		AvgSINR:     avgSINR,
-		AvgRSRQ:     avgRSRQ,
-		CellID:      lastCell,
-		TowerSwitch: towerSwitch,
-		SampleCount: len(scoredSamples),
-		Time:        time.Now(),
+		ID:           s.positionCounter,
+		Phase:        s.phase,
+		AzimuthStep:  s.currentAzStep,
+		TiltStep:     s.currentTiltStep,
+		AvgScore:     math.Round(avgScore*10) / 10,
+		AvgRSRP:      avgRSRP,
+		AvgSINR:      avgSINR,
+		AvgRSRQ:      avgRSRQ,
+		CellID:       lastCell,
+		Band:         lastBand,
+		TowerSwitch:  towerSwitch,
+		BandSwitch:   bandSwitch,
+		HighVariance: highVariance,
+		SINRSpread:   math.Round(spread*10) / 10,
+		SampleCount:  len(scoredSamples),
+		Time:         time.Now(),
 	}
 	s.positions = append(s.positions, pos)
 
-	// Update overall best
-	if s.bestPosition == nil || pos.AvgScore > s.bestPosition.AvgScore {
-		posCopy := pos
-		s.bestPosition = &posCopy
+	// P3: Save first measurement as reference position
+	if s.referencePosition == nil {
+		refCopy := pos
+		s.referencePosition = &refCopy
+	}
+
+	// Update overall best (only for scan phases, not verify)
+	if s.phase != PhaseVerify {
+		if s.bestPosition == nil || pos.AvgScore > s.bestPosition.AvgScore {
+			posCopy := pos
+			s.bestPosition = &posCopy
+		}
 	}
 
 	if s.mode == ModeGuided {
@@ -584,6 +701,7 @@ func (s *Session) finalizeMeasurement() {
 	}
 	s.notify()
 }
+
 
 func (s *Session) advanceGuidedState() {
 	switch s.phase {
@@ -700,19 +818,107 @@ func (s *Session) transitionToPhase(newPhase Phase) {
 
 	switch newPhase {
 	case PhaseFineAz10:
-		s.stepSize = 10
+		s.stepSize = s.fineStep1()
 		s.beginHillClimb(newPhase, false)
 	case PhaseFineAz5:
-		s.stepSize = 5
+		s.stepSize = s.fineStep2()
 		s.beginHillClimb(newPhase, false)
 	case PhaseTilt:
 		s.stepSize = 5
 		s.beginTiltClimb()
 	case PhaseRecheck:
-		s.stepSize = 5
+		s.stepSize = s.fineStep2()
 		s.beginHillClimb(newPhase, false)
+	case PhaseVerify:
+		s.beginVerify()
 	case PhaseDone:
 		s.finishSession()
+	}
+}
+
+func (s *Session) beginVerify() {
+	// Navigate back to the best position for a final drift verification measurement
+	action := ActionHold
+	text := "Final verification: re-measuring at best position to verify conditions didn't drift. Press Measure."
+	amountDeg := 0
+
+	if s.bestPosition != nil {
+		deltaSteps := s.bestPosition.AzimuthStep - s.currentAzStep
+		if deltaSteps != 0 {
+			amountDeg = abs(deltaSteps) * s.getCoarseStepDeg()
+			if deltaSteps > 0 {
+				action = ActionTurnRight
+				text = fmt.Sprintf("Turn RIGHT about %d° to return to best position for verification, then press Measure", amountDeg)
+			} else {
+				action = ActionTurnLeft
+				text = fmt.Sprintf("Turn LEFT about %d° to return to best position for verification, then press Measure", amountDeg)
+			}
+			s.currentAzStep = s.bestPosition.AzimuthStep
+		}
+		if s.bestPosition.TiltStep != s.currentTiltStep {
+			s.currentTiltStep = s.bestPosition.TiltStep
+		}
+	}
+
+	s.instruction = Instruction{
+		Action:    action,
+		AmountDeg: amountDeg,
+		Text:      text,
+		Phase:     PhaseVerify,
+	}
+	s.instruction.Progress.Current = 0
+	s.instruction.Progress.EstimatedTotal = 1
+}
+
+func (s *Session) advanceToNextPhase() {
+	s.offerFullScan = false
+	switch s.phase {
+	case PhaseHint:
+		s.transitionToPhase(PhaseCoarse)
+	case PhaseCoarse:
+		s.transitionToPhase(PhaseFineAz10)
+	case PhaseFineAz10:
+		s.transitionToPhase(PhaseFineAz5)
+	case PhaseFineAz5:
+		s.transitionToPhase(PhaseTilt)
+	case PhaseTilt:
+		s.transitionToPhase(PhaseRecheck)
+	case PhaseRecheck:
+		s.transitionToPhase(PhaseVerify)
+	case PhaseVerify:
+		s.transitionToPhase(PhaseDone)
+	case PhaseDone:
+		// Already done
+	}
+}
+
+func (s *Session) finishSession() {
+	s.phase = PhaseDone
+	text := "Alignment complete!"
+	if s.bestPosition != nil {
+		azDeg := s.bestPosition.AzimuthStep * s.getCoarseStepDeg()
+		tiltDeg := s.bestPosition.TiltStep * 5
+		text = fmt.Sprintf("Alignment complete! Best position: azimuth %d°, tilt %d°, score %.1f",
+			azDeg, tiltDeg, s.bestPosition.AvgScore)
+
+		if s.referencePosition != nil {
+			delta := math.Round((s.bestPosition.AvgScore-s.referencePosition.AvgScore)*10) / 10
+			if delta >= 0 {
+				text += fmt.Sprintf(" (+%.1f vs start)", delta)
+			} else {
+				text += fmt.Sprintf(" (%.1f vs start)", delta)
+			}
+		}
+
+		// If not at best, give return instructions
+		if s.currentAzStep != s.bestPosition.AzimuthStep || s.currentTiltStep != s.bestPosition.TiltStep {
+			text += ". Return to the best position."
+		}
+	}
+	s.instruction = Instruction{
+		Action: ActionDone,
+		Text:   text,
+		Phase:  PhaseDone,
 	}
 }
 
@@ -939,46 +1145,7 @@ func (s *Session) setTiltInstruction() {
 	s.instruction.Progress.EstimatedTotal = 6
 }
 
-func (s *Session) advanceToNextPhase() {
-	s.offerFullScan = false
-	switch s.phase {
-	case PhaseHint:
-		s.transitionToPhase(PhaseCoarse)
-	case PhaseCoarse:
-		s.transitionToPhase(PhaseFineAz10)
-	case PhaseFineAz10:
-		s.transitionToPhase(PhaseFineAz5)
-	case PhaseFineAz5:
-		s.transitionToPhase(PhaseTilt)
-	case PhaseTilt:
-		s.transitionToPhase(PhaseRecheck)
-	case PhaseRecheck:
-		s.transitionToPhase(PhaseDone)
-	case PhaseDone:
-		// Already done
-	}
-}
 
-func (s *Session) finishSession() {
-	s.phase = PhaseDone
-	text := "Alignment complete!"
-	if s.bestPosition != nil {
-		azDeg := s.bestPosition.AzimuthStep * s.getCoarseStepDeg()
-		tiltDeg := s.bestPosition.TiltStep * 5
-		text = fmt.Sprintf("Alignment complete! Best position: azimuth %d°, tilt %d°, score %.1f",
-			azDeg, tiltDeg, s.bestPosition.AvgScore)
-
-		// If not at best, give return instructions
-		if s.currentAzStep != s.bestPosition.AzimuthStep || s.currentTiltStep != s.bestPosition.TiltStep {
-			text += ". Return to the best position."
-		}
-	}
-	s.instruction = Instruction{
-		Action: ActionDone,
-		Text:   text,
-		Phase:  PhaseDone,
-	}
-}
 
 // --- helpers ---
 
@@ -1021,19 +1188,105 @@ func (s *Session) estimateTotal(phase Phase) int {
 		return 6
 	case PhaseRecheck:
 		return 6
+	case PhaseVerify:
+		return 1
 	default:
 		return 20
 	}
 }
 
 func (s *Session) getCoarseStepDeg() int {
-	// During coarse phase, each azimuth step = 30°
+	// During coarse phase, each azimuth step = beamwidth / 2
 	// During fine phases, each step depends on stepSize
-	// For navigation purposes, we use the current step size
 	if s.stepSize > 0 {
 		return s.stepSize
 	}
-	return 30
+	return s.beamwidthDeg / 2
+}
+
+// coarseStep returns the coarse scan step size derived from beamwidth.
+func (s *Session) coarseStep() int {
+	v := s.beamwidthDeg / 2
+	if v < 5 {
+		return 5
+	}
+	return v
+}
+
+// fineStep1 returns the first fine scan step size (beamwidth/6).
+func (s *Session) fineStep1() int {
+	v := s.beamwidthDeg / 6
+	if v < 3 {
+		return 3
+	}
+	return v
+}
+
+// fineStep2 returns the second fine scan step size (beamwidth/12).
+func (s *Session) fineStep2() int {
+	v := s.beamwidthDeg / 12
+	if v < 3 {
+		return 3
+	}
+	return v
+}
+
+// samplesAreIdentical checks if two samples have identical signal values.
+func samplesAreIdentical(a, b *router.Sample) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	eq := func(x, y *float64) bool {
+		if x == nil && y == nil {
+			return true
+		}
+		if x == nil || y == nil {
+			return false
+		}
+		return *x == *y
+	}
+	return eq(a.RSRP, b.RSRP) && eq(a.SINR, b.SINR) &&
+		eq(a.RSRQ, b.RSRQ) && eq(a.RSSI, b.RSSI)
+}
+
+// sinrSpread returns the max-min SINR across samples (0 if <2 valid values).
+func sinrSpread(samples []router.Sample) float64 {
+	min, max := math.MaxFloat64, -math.MaxFloat64
+	n := 0
+	for _, s := range samples {
+		if s.SINR != nil {
+			v := *s.SINR
+			if v < min {
+				min = v
+			}
+			if v > max {
+				max = v
+			}
+			n++
+		}
+	}
+	if n < 2 {
+		return 0
+	}
+	return max - min
+}
+
+// settleConverged checks if the last N SINR values differ by less than thresholdDB.
+func settleConverged(history []float64, n int, thresholdDB float64) bool {
+	if len(history) < n {
+		return false
+	}
+	tail := history[len(history)-n:]
+	min, max := tail[0], tail[0]
+	for _, v := range tail[1:] {
+		if v < min {
+			min = v
+		}
+		if v > max {
+			max = v
+		}
+	}
+	return (max - min) < thresholdDB
 }
 
 func abs(x int) int {
@@ -1043,5 +1296,3 @@ func abs(x int) int {
 	return x
 }
 
-// Unused import guard
-var _ = math.Round
